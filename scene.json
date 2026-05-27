@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "renderer": {
+    "integrator": "path_tracing",
+    "max_depth": 6,
+    "seed": 1,
+    "field_width": 256,
+    "field_height": 128,
+    "field_bounds_min": [-3.20000005, -2.25],
+    "field_bounds_max": [3.20000005, 2.25],
+    "samples_per_frame": 1,
+    "stop_after_samples": 0
+  },
+  "materials": [
+    {
+      "name": "white diffuse",
+      "kind": "diffuse",
+      "albedo": [0.779999971, 0.779999971, 0.74000001],
+      "emission": [0, 0, 0],
+      "ior": 1
+    },
+    {
+      "name": "red diffuse",
+      "kind": "diffuse",
+      "albedo": [0.899999976, 0.25, 0.200000003],
+      "emission": [0, 0, 0],
+      "ior": 1
+    },
+    {
+      "name": "blue diffuse",
+      "kind": "diffuse",
+      "albedo": [0.25, 0.349999994, 0.949999988],
+      "emission": [0, 0, 0],
+      "ior": 1
+    },
+    {
+      "name": "glass dielectric",
+      "kind": "dielectric",
+      "albedo": [0.959999979, 0.980000019, 1],
+      "emission": [0, 0, 0],
+      "ior": 1.5
+    },
+    {
+      "name": "area light",
+      "kind": "diffuse",
+      "albedo": [0, 0, 0],
+      "emission": [10000, 10000, 10000],
+      "ior": 1
+    }
+  ],
+  "segments": [
+    {
+      "a": [-3, -2],
+      "b": [3, -2],
+      "normal": [0, 1],
+      "material": 0
+    },
+    {
+      "a": [3, -2],
+      "b": [3, 2],
+      "normal": [-1, 0],
+      "material": 2
+    },
+    {
+      "a": [3, 2],
+      "b": [0.649999976, 2],
+      "normal": [0, -1],
+      "material": 0
+    },
+    {
+      "a": [0.670000017, 2],
+      "b": [-3, 2],
+      "normal": [-0, -1],
+      "material": 0
+    },
+    {
+      "a": [-3, 2],
+      "b": [-3, -2],
+      "normal": [1, 0],
+      "material": 1
+    },
+    {
+      "a": [-0.00100000005, 1.89999998],
+      "b": [0.00100000005, 1.89999998],
+      "normal": [0, -1],
+      "material": 4
+    },
+    {
+      "a": [-2.67591143, 1.58987761],
+      "b": [-0.414105237, -0.918602884],
+      "normal": [-0.742679417, -0.669647217],
+      "material": 0
+    },
+    {
+      "a": [0.327976078, -0.910214901],
+      "b": [2.3184154, 1.26012099],
+      "normal": [-0.736990929, 0.675902665],
+      "material": 0
+    }
+  ],
+  "circles": [
+    {
+      "center": [0, 0.970000029],
+      "radius": 0.910000026,
+      "material": 3
+    }
+  ]
+}
