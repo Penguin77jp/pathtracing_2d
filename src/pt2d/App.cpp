@@ -27,6 +27,70 @@ ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
 }
 
+
+float wrap01(float x) {
+    x = std::fmod(x, 1.0f);
+    if (x < 0.0f) {
+        x += 1.0f;
+    }
+    return x;
+}
+
+ImVec4 hsv_to_rgb(float h, float s, float v, float a = 1.0f) {
+    h = wrap01(h);
+    s = std::clamp(s, 0.0f, 1.0f);
+    v = std::clamp(v, 0.0f, 1.0f);
+
+    const float c = v * s;
+    const float hp = h * 6.0f;
+    const float x = c * (1.0f - std::fabs(std::fmod(hp, 2.0f) - 1.0f));
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+
+    if (hp < 1.0f) {
+        r = c;
+        g = x;
+    } else if (hp < 2.0f) {
+        r = x;
+        g = c;
+    } else if (hp < 3.0f) {
+        g = c;
+        b = x;
+    } else if (hp < 4.0f) {
+        g = x;
+        b = c;
+    } else if (hp < 5.0f) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
+
+    const float m = v - c;
+    return ImVec4{r + m, g + m, b + m, std::clamp(a, 0.0f, 1.0f)};
+}
+
+ImVec4 with_alpha(ImVec4 color, float alpha) {
+    color.w = std::clamp(alpha, 0.0f, 1.0f);
+    return color;
+}
+
+ImU32 im_color(ImVec4 color) {
+    const int r = static_cast<int>(std::clamp(color.x, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const int g = static_cast<int>(std::clamp(color.y, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const int b = static_cast<int>(std::clamp(color.z, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const int a = static_cast<int>(std::clamp(color.w, 0.0f, 1.0f) * 255.0f + 0.5f);
+    return rgba(r, g, b, a);
+}
+
+ImVec4 reservoir_hsv_color(int index) {
+    static constexpr float golden_ratio_conjugate = 0.61803398875f;
+    const float hue = wrap01(static_cast<float>(std::max(0, index)) * golden_ratio_conjugate);
+    return hsv_to_rgb(hue, 0.72f, 0.96f, 1.0f);
+}
+
 float luminance(Color c) {
     return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
 }
@@ -585,22 +649,46 @@ void App::draw_field_panel() {
     ImGui::Text("Selected pixel: (%d, %d)", m_selected_pixel_x, m_selected_pixel_y);
     ImGui::Text("Debug position: %.3f, %.3f", m_debug_world_position.x, m_debug_world_position.y);
 
-    const int max_sample = std::max(0, m_field.samples() - 1);
-    m_debug_sample_index = std::clamp(m_debug_sample_index, 0, max_sample);
-    if (ImGui::SliderInt("Debug sample index", &m_debug_sample_index, 0, std::max(0, max_sample))) {
+    draw_debug_sample_controls();
+
+    ImGui::End();
+}
+
+int App::debug_sample_max() const {
+    return std::max(0, m_field.samples() - 1);
+}
+
+void App::clamp_debug_sample_index() {
+    m_debug_sample_index = std::clamp(m_debug_sample_index, 0, debug_sample_max());
+}
+
+void App::draw_debug_sample_controls() {
+    clamp_debug_sample_index();
+    const int max_sample = debug_sample_max();
+
+    ImGui::Separator();
+    ImGui::Text("Debug sample: %d / %d", m_debug_sample_index, max_sample);
+    ImGui::TextWrapped("Rays, Hits, Normals, and Labels are drawn from the same retraced sample index.");
+
+    if (ImGui::SliderInt("Debug sample index", &m_debug_sample_index, 0, max_sample)) {
+        clamp_debug_sample_index();
         retrace_debug_sample();
     }
+
     if (ImGui::Button("Previous sample")) {
         m_debug_sample_index = std::max(0, m_debug_sample_index - 1);
         retrace_debug_sample();
     }
     ImGui::SameLine();
     if (ImGui::Button("Next sample")) {
-        m_debug_sample_index += 1;
+        m_debug_sample_index = std::min(max_sample, m_debug_sample_index + 1);
         retrace_debug_sample();
     }
-
-    ImGui::End();
+    ImGui::SameLine();
+    if (ImGui::Button("Latest sample")) {
+        m_debug_sample_index = max_sample;
+        retrace_debug_sample();
+    }
 }
 
 void App::draw_scene_panel() {
@@ -620,6 +708,8 @@ void App::draw_scene_panel() {
     ImGui::Checkbox("Labels", &m_show_debug_labels);
     ImGui::SameLine();
     ImGui::Checkbox("Reservoir", &m_show_reservoir_debug);
+
+    draw_debug_sample_controls();
 
     ImGui::TextWrapped("Image click: select a field pixel. Canvas click near an object: select/edit it. Canvas click empty space: debug exact world position. Drag selected handles to modify geometry. Right drag pans, mouse wheel zooms. Reservoir opens a RIS distribution window for clicked field pixels while RIS direction is active.");
     draw_canvas();
@@ -868,12 +958,14 @@ void App::draw_canvas() {
                 m_debug_uses_selected_pixel = true;
                 m_debug_world_position = m_field.pixel_center_to_world(px, py);
                 if (m_show_reservoir_debug && m_settings.kind == IntegratorKind::RISDirection) {
+                    const int window_id = m_next_reservoir_window_id++;
                     m_reservoir_windows.push_back({
-                        m_next_reservoir_window_id++,
+                        window_id,
                         true,
                         px,
                         py,
-                        m_debug_world_position
+                        m_debug_world_position,
+                        reservoir_hsv_color(window_id - 1)
                     });
                 }
             } else {
@@ -973,6 +1065,25 @@ void App::draw_canvas() {
     }
 
     draw_debug_events();
+
+    for (const ReservoirDebugWindow& window : m_reservoir_windows) {
+        if (!window.open) {
+            continue;
+        }
+
+        const ImU32 marker_color = im_color(window.color);
+        const ImU32 marker_fill = im_color(with_alpha(window.color, 0.28f));
+        const ImVec2 p = world_to_screen(window.world_position);
+        draw_list->AddCircleFilled(p, 8.5f, marker_fill, 32);
+        draw_list->AddCircle(p, 8.5f, marker_color, 32, 2.5f);
+        draw_list->AddLine(ImVec2{p.x - 12.0f, p.y}, ImVec2{p.x + 12.0f, p.y}, marker_color, 1.5f);
+        draw_list->AddLine(ImVec2{p.x, p.y - 12.0f}, ImVec2{p.x, p.y + 12.0f}, marker_color, 1.5f);
+        if (m_show_debug_labels) {
+            char label[32];
+            std::snprintf(label, sizeof(label), "R%d", window.id);
+            draw_list->AddText(ImVec2{p.x + 10.0f, p.y - 18.0f}, marker_color, label);
+        }
+    }
 }
 
 void App::draw_debug_events() {
@@ -1135,12 +1246,27 @@ void App::draw_reservoir_windows() {
         }
 
         char title[128];
-        std::snprintf(title, sizeof(title), "RIS Reservoir (%d, %d)###ris_reservoir_%d", window.pixel_x, window.pixel_y, window.id);
-        if (!ImGui::Begin(title, &window.open)) {
+        std::snprintf(title, sizeof(title), "RIS Reservoir R%d (%d, %d)###ris_reservoir_%d", window.id, window.pixel_x, window.pixel_y, window.id);
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, with_alpha(window.color, 0.42f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, with_alpha(window.color, 0.78f));
+        ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, with_alpha(window.color, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_Border, with_alpha(window.color, 0.95f));
+        const bool visible = ImGui::Begin(title, &window.open);
+        ImGui::PopStyleColor(4);
+        if (!visible) {
             ImGui::End();
             continue;
         }
 
+        const ImVec2 strip_pos = ImGui::GetCursorScreenPos();
+        const float strip_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+        ImGui::Dummy(ImVec2{strip_width, 5.0f});
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            strip_pos,
+            ImVec2{strip_pos.x + strip_width, strip_pos.y + 5.0f},
+            im_color(window.color));
+
+        ImGui::Text("Marker: R%d", window.id);
         ImGui::Text("Pixel: (%d, %d)", window.pixel_x, window.pixel_y);
         ImGui::Text("World: %.3f, %.3f", window.world_position.x, window.world_position.y);
         ImGui::Text("Accumulated samples: %d", m_field.samples());
@@ -1191,6 +1317,7 @@ void App::draw_reservoir_windows() {
 }
 
 void App::retrace_debug_sample() {
+    clamp_debug_sample_index();
     m_debug_recorder.clear();
 
     Sampler sampler(m_settings.seed);

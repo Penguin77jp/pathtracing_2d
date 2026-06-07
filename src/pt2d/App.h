@@ -80,6 +80,9 @@ private:
     void draw_debug_events();
     void draw_reservoir_windows();
     void draw_reservoir_polar_plot(const RISDirection& ris_direction, ImVec2 size);
+    void draw_debug_sample_controls();
+    int debug_sample_max() const;
+    void clamp_debug_sample_index();
     void retrace_debug_sample();
     void reset_accumulation();
     void save_scene();
@@ -108,6 +111,7 @@ private:
         int pixel_x = 0;
         int pixel_y = 0;
         Vec2 world_position = {0.0f, 0.0f};
+        ImVec4 color = {1.0f, 1.0f, 1.0f, 1.0f};
     };
 
     bool m_running = true;
