@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,10 +26,30 @@ enum class SelectedObjectKind {
     Circle
 };
 
+struct RecordedDebugSample {
+    int sample_index = 0;
+    DebugRecorder recorder;
+    std::optional<RISDirection> reservoir_before;
+    std::optional<RISDirection> reservoir_after;
+    Color contribution = make_color(0.0f);
+};
+
+struct ReservoirDebugWindow {
+    int id = 0;
+    bool open = true;
+    int pixel_x = 0;
+    int pixel_y = 0;
+    Vec2 world_position = {0.0f, 0.0f};
+    ImVec4 color = {1.0f, 1.0f, 1.0f, 1.0f};
+    bool last_state = true;
+    int recording_start_sample = 0;
+    std::vector<RecordedDebugSample> recorded_samples;
+};
+
 class FieldAccumulator {
 public:
     void reset(int width, int height, FieldBounds bounds);
-    void accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame);
+    void accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame, std::vector<ReservoirDebugWindow>* reservoir_windows = nullptr);
     void upload_to_texture();
     bool save_png(const std::string& path);
 
@@ -81,8 +102,12 @@ private:
     void draw_reservoir_windows();
     void draw_reservoir_polar_plot(const RISDirection& ris_direction, ImVec2 size);
     void draw_debug_sample_controls();
+    int debug_sample_min() const;
     int debug_sample_max() const;
     void clamp_debug_sample_index();
+    ReservoirDebugWindow* active_reservoir_window_for_selected_pixel();
+    const ReservoirDebugWindow* active_reservoir_window_for_selected_pixel() const;
+    const RecordedDebugSample* find_recorded_sample(const ReservoirDebugWindow& window, int sample_index) const;
     void retrace_debug_sample();
     void reset_accumulation();
     void save_scene();
@@ -104,15 +129,6 @@ private:
     IntegratorSettings m_settings;
     FieldAccumulator m_field;
     DebugRecorder m_debug_recorder;
-
-    struct ReservoirDebugWindow {
-        int id = 0;
-        bool open = true;
-        int pixel_x = 0;
-        int pixel_y = 0;
-        Vec2 world_position = {0.0f, 0.0f};
-        ImVec4 color = {1.0f, 1.0f, 1.0f, 1.0f};
-    };
 
     bool m_running = true;
     bool m_render_paused = false;

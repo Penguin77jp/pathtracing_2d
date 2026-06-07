@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -268,7 +269,7 @@ const RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y) cons
     return &m_ris_direction[static_cast<size_t>(y * m_width + x)];
 }
 
-void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame) {
+void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame, std::vector<ReservoirDebugWindow>* reservoir_windows) {
     if (m_accum.empty()) {
         reset(m_width, m_height, m_bounds);
     }
@@ -304,7 +305,42 @@ void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& 
                 if (settings.kind == IntegratorKind::RISDirection) {
                     ris_direction_ptr = &m_ris_direction[static_cast<size_t>(y * m_width + x)];
                 }
-                m_accum[static_cast<size_t>(y * m_width + x)] += estimate_at(scene, position, sampler, settings, nullptr, photon_map_ptr, ris_direction_ptr);
+
+                std::vector<ReservoirDebugWindow*> matching_reservoir_windows;
+                if (reservoir_windows != nullptr && settings.kind == IntegratorKind::RISDirection) {
+                    for (ReservoirDebugWindow& window : *reservoir_windows) {
+                        if (window.open && window.pixel_x == x && window.pixel_y == y) {
+                            matching_reservoir_windows.push_back(&window);
+                        }
+                    }
+                }
+
+                DebugRecorder recorder;
+                DebugRecorder* recorder_ptr = matching_reservoir_windows.empty() ? nullptr : &recorder;
+                std::optional<RISDirection> reservoir_before;
+                if (!matching_reservoir_windows.empty() && ris_direction_ptr != nullptr) {
+                    reservoir_before = *ris_direction_ptr;
+                }
+
+                const Color contribution = estimate_at(scene, position, sampler, settings, recorder_ptr, photon_map_ptr, ris_direction_ptr);
+                m_accum[static_cast<size_t>(y * m_width + x)] += contribution;
+
+                if (!matching_reservoir_windows.empty()) {
+                    std::optional<RISDirection> reservoir_after;
+                    if (ris_direction_ptr != nullptr) {
+                        reservoir_after = *ris_direction_ptr;
+                    }
+
+                    for (ReservoirDebugWindow* window : matching_reservoir_windows) {
+                        RecordedDebugSample recorded;
+                        recorded.sample_index = sample_index;
+                        recorded.recorder = recorder;
+                        recorded.reservoir_before = reservoir_before;
+                        recorded.reservoir_after = reservoir_after;
+                        recorded.contribution = contribution;
+                        window->recorded_samples.push_back(std::move(recorded));
+                    }
+                }
             }
         }
     }
@@ -432,8 +468,12 @@ void App::run() {
             }
 
             if (spp > 0) {
-                m_field.accumulate(m_scene, m_settings, spp);
+                m_field.accumulate(m_scene, m_settings, spp, &m_reservoir_windows);
                 m_field.upload_to_texture();
+                if (active_reservoir_window_for_selected_pixel() != nullptr) {
+                    clamp_debug_sample_index();
+                    retrace_debug_sample();
+                }
                 if (m_stop_after_samples > 0 && m_field.samples() >= m_stop_after_samples) {
                     m_render_paused = true;
                 }
@@ -654,29 +694,97 @@ void App::draw_field_panel() {
     ImGui::End();
 }
 
+const RecordedDebugSample* App::find_recorded_sample(const ReservoirDebugWindow& window, int sample_index) const {
+    for (const RecordedDebugSample& sample : window.recorded_samples) {
+        if (sample.sample_index == sample_index) {
+            return &sample;
+        }
+    }
+    return nullptr;
+}
+
+ReservoirDebugWindow* App::active_reservoir_window_for_selected_pixel() {
+    if (!m_debug_uses_selected_pixel) {
+        return nullptr;
+    }
+
+    ReservoirDebugWindow* result = nullptr;
+    for (ReservoirDebugWindow& window : m_reservoir_windows) {
+        if (window.open && window.pixel_x == m_selected_pixel_x && window.pixel_y == m_selected_pixel_y) {
+            result = &window;
+        }
+    }
+    return result;
+}
+
+const ReservoirDebugWindow* App::active_reservoir_window_for_selected_pixel() const {
+    if (!m_debug_uses_selected_pixel) {
+        return nullptr;
+    }
+
+    const ReservoirDebugWindow* result = nullptr;
+    for (const ReservoirDebugWindow& window : m_reservoir_windows) {
+        if (window.open && window.pixel_x == m_selected_pixel_x && window.pixel_y == m_selected_pixel_y) {
+            result = &window;
+        }
+    }
+    return result;
+}
+
+int App::debug_sample_min() const {
+    if (const ReservoirDebugWindow* window = active_reservoir_window_for_selected_pixel()) {
+        if (!window->recorded_samples.empty()) {
+            return window->recorded_samples.front().sample_index;
+        }
+        return window->recording_start_sample;
+    }
+    return 0;
+}
+
 int App::debug_sample_max() const {
+    if (const ReservoirDebugWindow* window = active_reservoir_window_for_selected_pixel()) {
+        if (!window->recorded_samples.empty()) {
+            return window->recorded_samples.back().sample_index;
+        }
+        return window->recording_start_sample;
+    }
     return std::max(0, m_field.samples() - 1);
 }
 
 void App::clamp_debug_sample_index() {
-    m_debug_sample_index = std::clamp(m_debug_sample_index, 0, debug_sample_max());
+    m_debug_sample_index = std::clamp(m_debug_sample_index, debug_sample_min(), debug_sample_max());
 }
 
 void App::draw_debug_sample_controls() {
     clamp_debug_sample_index();
+    const int min_sample = debug_sample_min();
     const int max_sample = debug_sample_max();
+    const ReservoirDebugWindow* tracked_window = active_reservoir_window_for_selected_pixel();
 
     ImGui::Separator();
-    ImGui::Text("Debug sample: %d / %d", m_debug_sample_index, max_sample);
-    ImGui::TextWrapped("Rays, Hits, Normals, and Labels are drawn from the same retraced sample index.");
+    if (tracked_window != nullptr) {
+        ImGui::Text("Debug sample: %d / %d - %d", m_debug_sample_index, min_sample, max_sample);
+        ImGui::TextWrapped("This pixel is recorded from real rendering. Samples before recording start are not available.");
+        if (tracked_window->recorded_samples.empty()) {
+            ImGui::TextWrapped("No recorded sample yet. Recording starts from the next rendered sample index: %d", tracked_window->recording_start_sample);
+            return;
+        }
+    } else {
+        ImGui::Text("Debug sample: %d / %d", m_debug_sample_index, max_sample);
+        ImGui::TextWrapped("Rays, Hits, Normals, and Labels are drawn from the same retraced sample index.");
+    }
 
-    if (ImGui::SliderInt("Debug sample index", &m_debug_sample_index, 0, max_sample)) {
-        clamp_debug_sample_index();
-        retrace_debug_sample();
+    if (min_sample < max_sample) {
+        if (ImGui::SliderInt("Debug sample index", &m_debug_sample_index, min_sample, max_sample)) {
+            clamp_debug_sample_index();
+            retrace_debug_sample();
+        }
+    } else {
+        ImGui::Text("Debug sample index: %d", m_debug_sample_index);
     }
 
     if (ImGui::Button("Previous sample")) {
-        m_debug_sample_index = std::max(0, m_debug_sample_index - 1);
+        m_debug_sample_index = std::max(min_sample, m_debug_sample_index - 1);
         retrace_debug_sample();
     }
     ImGui::SameLine();
@@ -910,14 +1018,17 @@ void App::draw_canvas() {
                 m_debug_world_position = m_field.pixel_center_to_world(px, py);
                 if (m_show_reservoir_debug && m_settings.kind == IntegratorKind::RISDirection) {
                     const int window_id = m_next_reservoir_window_id++;
-                    m_reservoir_windows.push_back({
-                        window_id,
-                        true,
-                        px,
-                        py,
-                        m_debug_world_position,
-                        reservoir_hsv_color(window_id - 1)
-                    });
+                    ReservoirDebugWindow window;
+                    window.id = window_id;
+                    window.open = true;
+                    window.pixel_x = px;
+                    window.pixel_y = py;
+                    window.world_position = m_debug_world_position;
+                    window.color = reservoir_hsv_color(window_id - 1);
+                    window.last_state = true;
+                    window.recording_start_sample = m_field.samples();
+                    m_debug_sample_index = window.recording_start_sample;
+                    m_reservoir_windows.push_back(std::move(window));
                 }
             } else {
                 m_debug_uses_selected_pixel = false;
@@ -1225,10 +1336,32 @@ void App::draw_reservoir_windows() {
         ImGui::Text("Pixel: (%d, %d)", window.pixel_x, window.pixel_y);
         ImGui::Text("World: %.3f, %.3f", window.world_position.x, window.world_position.y);
         ImGui::Text("Accumulated samples: %d", m_field.samples());
+        ImGui::Text("Recorded samples: %d", static_cast<int>(window.recorded_samples.size()));
+        if (!window.recorded_samples.empty()) {
+            ImGui::Text("Recorded range: %d - %d", window.recorded_samples.front().sample_index, window.recorded_samples.back().sample_index);
+        } else {
+            ImGui::Text("Recording starts at sample: %d", window.recording_start_sample);
+        }
+
+        ImGui::Checkbox("Last State", &window.last_state);
 
         const RISDirection* ris_direction = nullptr;
-        if (m_settings.kind == IntegratorKind::RISDirection) {
-            ris_direction = m_field.ris_direction_for_pixel(window.pixel_x, window.pixel_y);
+        const RecordedDebugSample* recorded_sample = nullptr;
+        if (window.last_state) {
+            if (m_settings.kind == IntegratorKind::RISDirection) {
+                ris_direction = m_field.ris_direction_for_pixel(window.pixel_x, window.pixel_y);
+            }
+            ImGui::TextWrapped("State source: latest live RIS state.");
+        } else {
+            recorded_sample = find_recorded_sample(window, m_debug_sample_index);
+            if (recorded_sample != nullptr && recorded_sample->reservoir_before.has_value()) {
+                ris_direction = &recorded_sample->reservoir_before.value();
+                ImGui::TextWrapped("State source: recorded debug sample %d, before RIS update. This is the distribution used to generate the displayed rays.", m_debug_sample_index);
+            } else {
+                ImGui::TextWrapped("Sample %d was not recorded for this reservoir. Samples before recording start cannot be reconstructed.", m_debug_sample_index);
+                ImGui::End();
+                continue;
+            }
         }
 
         if (ris_direction == nullptr) {
@@ -1274,6 +1407,16 @@ void App::draw_reservoir_windows() {
 void App::retrace_debug_sample() {
     clamp_debug_sample_index();
     m_debug_recorder.clear();
+
+    if (ReservoirDebugWindow* window = active_reservoir_window_for_selected_pixel()) {
+        m_selected_pixel_x = std::clamp(m_selected_pixel_x, 0, std::max(0, m_field.width() - 1));
+        m_selected_pixel_y = std::clamp(m_selected_pixel_y, 0, std::max(0, m_field.height() - 1));
+        m_debug_world_position = m_field.pixel_center_to_world(m_selected_pixel_x, m_selected_pixel_y);
+        if (const RecordedDebugSample* recorded = find_recorded_sample(*window, m_debug_sample_index)) {
+            m_debug_recorder = recorded->recorder;
+        }
+        return;
+    }
 
     Sampler sampler(m_settings.seed);
     if (m_debug_uses_selected_pixel) {
@@ -1372,6 +1515,14 @@ void App::reset_accumulation() {
     if (m_field_bounds.min.y > m_field_bounds.max.y) std::swap(m_field_bounds.min.y, m_field_bounds.max.y);
     m_field.reset(m_field_width, m_field_height, m_field_bounds);
     m_debug_sample_index = 0;
+    for (ReservoirDebugWindow& window : m_reservoir_windows) {
+        window.pixel_x = std::clamp(window.pixel_x, 0, std::max(0, m_field.width() - 1));
+        window.pixel_y = std::clamp(window.pixel_y, 0, std::max(0, m_field.height() - 1));
+        window.world_position = m_field.pixel_center_to_world(window.pixel_x, window.pixel_y);
+        window.recording_start_sample = m_field.samples();
+        window.recorded_samples.clear();
+    }
+    m_debug_recorder.clear();
 
     // When auto-stop has paused rendering at the target sample count, any scene
     // edit or render-setting reset must start a fresh accumulation run.
