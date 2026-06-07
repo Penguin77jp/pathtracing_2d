@@ -693,6 +693,7 @@ void App::draw_debug_sample_controls() {
 
 void App::draw_scene_panel() {
     ImGui::Begin("Scene Editor / Path Debug");
+    ImGui::BeginChild("SceneEditorScrollableContent", ImVec2(0.0f, 0.0f), true);
 
     draw_scene_controls();
     ImGui::Separator();
@@ -709,11 +710,20 @@ void App::draw_scene_panel() {
     ImGui::SameLine();
     ImGui::Checkbox("Reservoir", &m_show_reservoir_debug);
 
+    const int ray_depth_max = std::max(0, m_settings.max_depth - 1);
+    m_debug_ray_display_max_depth = std::clamp(m_debug_ray_display_max_depth, 0, ray_depth_max);
+    if (m_show_debug_rays) {
+        ImGui::SliderInt("Ray display max depth", &m_debug_ray_display_max_depth, 0, ray_depth_max);
+        ImGui::SameLine();
+        ImGui::Text("render max depth: %d", m_settings.max_depth);
+    }
+
     draw_debug_sample_controls();
 
     ImGui::TextWrapped("Image click: select a field pixel. Canvas click near an object: select/edit it. Canvas click empty space: debug exact world position. Drag selected handles to modify geometry. Right drag pans, mouse wheel zooms. Reservoir opens a RIS distribution window for clicked field pixels while RIS direction is active.");
     draw_canvas();
 
+    ImGui::EndChild();
     ImGui::End();
 }
 
@@ -746,7 +756,7 @@ void App::draw_scene_controls() {
     }
 
     if (ImGui::Button("Add wall")) {
-        const int mat = default_wall_material();
+        const Material mat = default_wall_material();
         const Vec2 a = m_view_center + Vec2{-0.7f, -0.25f};
         const Vec2 b = m_view_center + Vec2{ 0.7f,  0.25f};
         const Vec2 n = normalize(perpendicular(b - a));
@@ -757,7 +767,7 @@ void App::draw_scene_controls() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Add light")) {
-        const int mat = default_light_material();
+        const Material mat = default_light_material();
         const Vec2 a = m_view_center + Vec2{-0.55f, 0.65f};
         const Vec2 b = m_view_center + Vec2{ 0.55f, 0.65f};
         m_selected_kind = SelectedObjectKind::Segment;
@@ -767,7 +777,7 @@ void App::draw_scene_controls() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Add glass circle")) {
-        const int mat = default_glass_material();
+        const Material mat = default_glass_material();
         m_selected_kind = SelectedObjectKind::Circle;
         m_selected_index = m_scene.add_circle(m_view_center, 0.45f, mat);
         m_selected_handle = -1;
@@ -795,7 +805,7 @@ void App::draw_scene_controls() {
             Segment copy = segment;
             copy.a += Vec2{0.15f, 0.15f};
             copy.b += Vec2{0.15f, 0.15f};
-            m_selected_index = m_scene.add_segment(copy.a, copy.b, copy.normal, copy.material_id);
+            m_selected_index = m_scene.add_segment(copy.a, copy.b, copy.normal, copy.material);
             mark_scene_edited();
             return;
         }
@@ -803,44 +813,15 @@ void App::draw_scene_controls() {
         bool edited = false;
         edited |= ImGui::DragFloat2("A", &segment.a.x, 0.02f);
         edited |= ImGui::DragFloat2("B", &segment.b.x, 0.02f);
+        edited |= draw_material_editor(segment.material);
 
-        int material_id = segment.material_id;
-        if (ImGui::BeginCombo("Material", m_scene.materials[material_id].name.c_str())) {
-            for (int i = 0; i < static_cast<int>(m_scene.materials.size()); ++i) {
-                const bool selected = i == material_id;
-                if (ImGui::Selectable(m_scene.materials[i].name.c_str(), selected)) {
-                    segment.material_id = i;
-                    edited = true;
-                }
-                if (selected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-
-        Material& material = m_scene.materials[segment.material_id];
-        float albedo[3] = {material.albedo.r, material.albedo.g, material.albedo.b};
-        if (ImGui::ColorEdit3("Material albedo", albedo)) {
-            material.albedo = {albedo[0], albedo[1], albedo[2]};
-            edited = true;
-        }
-        float emission[3] = {material.emission.r, material.emission.g, material.emission.b};
-        if (ImGui::DragFloat3("Material emission", emission, 0.05f, 0.0f, 50.0f)) {
-            material.emission = {emission[0], emission[1], emission[2]};
-            edited = true;
-        }
-        if (material.is_light()) {
-            float angle = material.emission_angle_deg;
+        if (segment.material.is_light()) {
+            float angle = segment.material.emission_angle_deg;
             if (ImGui::InputFloat("Emission angle deg (0-360)", &angle, 1.0f, 15.0f, "%.1f")) {
-                material.emission_angle_deg = std::max(0.0f, std::min(360.0f, angle));
+                segment.material.emission_angle_deg = std::max(0.0f, std::min(360.0f, angle));
                 edited = true;
             }
-            ImGui::TextWrapped("Angle is centered around the segment normal. 180 deg matches the original one-sided light; 360 deg emits to both sides.");
-        }
-
-        if (material.is_dielectric()) {
-            if (ImGui::DragFloat("IOR", &material.ior, 0.01f, 1.0f, 3.0f)) {
-                edited = true;
-            }
+            ImGui::TextWrapped("Angle is centered around the segment normal. 180 deg is one-sided; 360 deg emits to both sides.");
         }
 
         if (edited) {
@@ -865,7 +846,7 @@ void App::draw_scene_controls() {
         if (ImGui::Button("Duplicate")) {
             Circle copy = circle;
             copy.center += Vec2{0.2f, 0.15f};
-            m_selected_index = m_scene.add_circle(copy.center, copy.radius, copy.material_id);
+            m_selected_index = m_scene.add_circle(copy.center, copy.radius, copy.material);
             m_selected_kind = SelectedObjectKind::Circle;
             mark_scene_edited();
             return;
@@ -874,37 +855,7 @@ void App::draw_scene_controls() {
         bool edited = false;
         edited |= ImGui::DragFloat2("Center", &circle.center.x, 0.02f);
         edited |= ImGui::DragFloat("Radius", &circle.radius, 0.01f, 0.02f, 5.0f);
-
-        int material_id = circle.material_id;
-        if (ImGui::BeginCombo("Material", m_scene.materials[material_id].name.c_str())) {
-            for (int i = 0; i < static_cast<int>(m_scene.materials.size()); ++i) {
-                const bool selected = i == material_id;
-                if (ImGui::Selectable(m_scene.materials[i].name.c_str(), selected)) {
-                    circle.material_id = i;
-                    edited = true;
-                }
-                if (selected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-
-        Material& material = m_scene.materials[circle.material_id];
-        int kind = static_cast<int>(material.kind);
-        const char* kinds[] = {"Diffuse", "Dielectric"};
-        if (ImGui::Combo("Material kind", &kind, kinds, IM_ARRAYSIZE(kinds))) {
-            material.kind = static_cast<MaterialKind>(kind);
-            edited = true;
-        }
-        float albedo[3] = {material.albedo.r, material.albedo.g, material.albedo.b};
-        if (ImGui::ColorEdit3("Material albedo / glass tint", albedo)) {
-            material.albedo = {albedo[0], albedo[1], albedo[2]};
-            edited = true;
-        }
-        if (material.is_dielectric()) {
-            if (ImGui::DragFloat("IOR", &material.ior, 0.01f, 1.0f, 3.0f)) {
-                edited = true;
-            }
-        }
+        edited |= draw_material_editor(circle.material);
 
         if (edited) {
             circle.radius = std::max(0.02f, circle.radius);
@@ -1026,7 +977,7 @@ void App::draw_canvas() {
     }
 
     for (const Segment& segment : m_scene.segments) {
-        const Material& material = m_scene.materials[segment.material_id];
+        const Material& material = segment.material;
         const bool light = material.is_light();
         const bool selected = m_selected_kind == SelectedObjectKind::Segment && segment.object_id == m_selected_index;
         const ImU32 color = selected ? rgba(255, 145, 90) : (light ? rgba(255, 230, 120) : rgba(210, 215, 225));
@@ -1043,7 +994,7 @@ void App::draw_canvas() {
     }
 
     for (const Circle& circle : m_scene.circles) {
-        const Material& material = m_scene.materials[circle.material_id];
+        const Material& material = circle.material;
         const bool selected = m_selected_kind == SelectedObjectKind::Circle && circle.object_id == m_selected_index;
         const ImU32 color = selected ? rgba(255, 145, 90) : (material.is_dielectric() ? rgba(120, 220, 255) : rgba(190, 210, 230));
         const ImVec2 c = world_to_screen(circle.center);
@@ -1089,11 +1040,15 @@ void App::draw_canvas() {
 void App::draw_debug_events() {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
+    const auto ray_is_visible = [this](const DebugEvent& event) {
+        return m_show_debug_rays && (event.depth < 0 || event.depth <= m_debug_ray_display_max_depth);
+    };
+
     for (const DebugEvent& event : m_debug_recorder.events()) {
         const ImU32 color = depth_color(event.depth);
         switch (event.type) {
             case DebugEventType::RaySegment:
-                if (m_show_debug_rays) {
+                if (ray_is_visible(event)) {
                     draw_arrow(draw_list, world_to_screen(event.ray_origin), world_to_screen(event.ray_end), color, 2.0f);
                 }
                 break;
@@ -1113,7 +1068,7 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::BsdfSample:
-                if (m_show_debug_rays) {
+                if (ray_is_visible(event)) {
                     const float len = event.depth < 0 ? 0.75f : 0.55f;
                     draw_arrow(draw_list, world_to_screen(event.hit_point), world_to_screen(event.hit_point + event.sampled_dir * len), event.depth < 0 ? rgba(255, 145, 90) : rgba(255, 210, 120), 1.5f);
                     if (m_show_debug_labels) {
@@ -1126,7 +1081,7 @@ void App::draw_debug_events() {
 
             case DebugEventType::LightSample:
                 draw_list->AddCircleFilled(world_to_screen(event.sampled_point), 5.5f, rgba(255, 240, 120));
-                if (m_show_debug_rays) {
+                if (ray_is_visible(event)) {
                     draw_list->AddLine(world_to_screen(event.hit_point), world_to_screen(event.sampled_point), event.blocked ? rgba(160, 90, 90, 150) : rgba(255, 235, 120, 180), 1.0f);
                 }
                 if (m_show_debug_labels) {
@@ -1137,7 +1092,7 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::ShadowRay:
-                if (m_show_debug_rays) {
+                if (ray_is_visible(event)) {
                     draw_list->AddLine(world_to_screen(event.ray_origin), world_to_screen(event.ray_end), event.blocked ? rgba(255, 80, 80) : rgba(120, 255, 150), 1.5f);
                 }
                 break;
@@ -1534,28 +1489,84 @@ void App::select_scene_handle(Vec2 world, float radius_world) {
     }
 }
 
-int App::ensure_material(const char* name, Material material) {
-    const int existing = m_scene.find_material_by_name(name);
-    if (existing >= 0) {
-        return existing;
+bool App::draw_material_editor(Material& material) {
+    bool edited = false;
+
+    ImGui::Separator();
+    ImGui::Text("Material");
+
+    int kind = static_cast<int>(material.kind);
+    const char* kinds[] = {"Diffuse", "Dielectric"};
+    if (ImGui::Combo("Kind", &kind, kinds, IM_ARRAYSIZE(kinds))) {
+        material.kind = static_cast<MaterialKind>(kind);
+        edited = true;
     }
-    material.name = name;
-    return m_scene.add_material(material);
+
+    float albedo[3] = {material.albedo.r, material.albedo.g, material.albedo.b};
+    if (ImGui::ColorEdit3("Albedo / tint", albedo)) {
+        material.albedo = {albedo[0], albedo[1], albedo[2]};
+        edited = true;
+    }
+
+    const float current_strength = std::max({material.emission.r, material.emission.g, material.emission.b});
+    float emission_strength = current_strength;
+    float emission_color[3] = {1.0f, 1.0f, 1.0f};
+    if (current_strength > 1.0e-6f) {
+        emission_color[0] = material.emission.r / current_strength;
+        emission_color[1] = material.emission.g / current_strength;
+        emission_color[2] = material.emission.b / current_strength;
+    }
+
+    bool emission_changed = false;
+    const bool color_changed = ImGui::ColorEdit3("Emission color", emission_color);
+    if (color_changed) {
+        emission_changed = true;
+        if (emission_strength <= 1.0e-6f) {
+            emission_strength = 1.0f;
+        }
+    }
+    if (ImGui::DragFloat("Emission strength", &emission_strength, 0.1f, 0.0f, 0.0f, "%.3f")) {
+        emission_strength = std::max(0.0f, emission_strength);
+        emission_changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear##emission")) {
+        emission_strength = 0.0f;
+        emission_changed = true;
+    }
+
+    if (emission_changed) {
+        emission_color[0] = std::max(0.0f, emission_color[0]);
+        emission_color[1] = std::max(0.0f, emission_color[1]);
+        emission_color[2] = std::max(0.0f, emission_color[2]);
+        material.emission = {
+            emission_color[0] * emission_strength,
+            emission_color[1] * emission_strength,
+            emission_color[2] * emission_strength
+        };
+        edited = true;
+    }
+
+    if (material.is_dielectric()) {
+        if (ImGui::DragFloat("IOR", &material.ior, 0.01f, 1.0f, 3.0f)) {
+            material.ior = std::max(1.0f, material.ior);
+            edited = true;
+        }
+    }
+
+    return edited;
 }
 
-int App::default_wall_material() const {
-    const int id = m_scene.find_material_by_name("white diffuse");
-    return id >= 0 ? id : 0;
+Material App::default_wall_material() const {
+    return {"wall", make_color(0.78f, 0.78f, 0.74f), make_color(0.0f), MaterialKind::Diffuse, 1.0f};
 }
 
-int App::default_light_material() const {
-    const int id = m_scene.find_material_by_name("area light");
-    return id >= 0 ? id : 0;
+Material App::default_light_material() const {
+    return {"light", make_color(0.0f), make_color(8.0f, 7.5f, 6.5f), MaterialKind::Diffuse, 1.0f, 180.0f};
 }
 
-int App::default_glass_material() const {
-    const int id = m_scene.find_material_by_name("glass dielectric");
-    return id >= 0 ? id : 0;
+Material App::default_glass_material() const {
+    return {"glass", make_color(0.96f, 0.98f, 1.0f), make_color(0.0f), MaterialKind::Dielectric, 1.5f};
 }
 
 void App::clear_selection() {

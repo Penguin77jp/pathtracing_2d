@@ -6,20 +6,6 @@
 
 namespace pt2d {
 
-int Scene::add_material(Material material) {
-    materials.push_back(std::move(material));
-    return static_cast<int>(materials.size() - 1);
-}
-
-int Scene::find_material_by_name(const std::string& name) const {
-    for (int i = 0; i < static_cast<int>(materials.size()); ++i) {
-        if (materials[i].name == name) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 void Scene::rebuild_object_ids() {
     for (int i = 0; i < static_cast<int>(segments.size()); ++i) {
         segments[i].object_id = i;
@@ -33,8 +19,7 @@ void Scene::rebuild_light_segment_ids() {
     rebuild_object_ids();
     light_segment_ids.clear();
     for (const Segment& segment : segments) {
-        if (segment.material_id >= 0 && segment.material_id < static_cast<int>(materials.size()) &&
-            materials[segment.material_id].is_light()) {
+        if (segment.material.is_light()) {
             light_segment_ids.push_back(segment.object_id);
         }
     }
@@ -59,28 +44,28 @@ void Scene::refresh_segment_normal_keep_side(int segment_id) {
     segment.normal = candidate;
 }
 
-int Scene::add_segment(Vec2 a, Vec2 b, Vec2 normal, int material_id) {
+int Scene::add_segment(Vec2 a, Vec2 b, Vec2 normal, Material material) {
     Segment s;
     s.a = a;
     s.b = b;
     s.normal = normalize(normal);
-    s.material_id = material_id;
+    s.material = std::move(material);
     s.object_id = static_cast<int>(segments.size());
-    segments.push_back(s);
-    if (material_id >= 0 && material_id < static_cast<int>(materials.size()) && materials[material_id].is_light()) {
-        light_segment_ids.push_back(s.object_id);
+    segments.push_back(std::move(s));
+    if (segments.back().material.is_light()) {
+        light_segment_ids.push_back(segments.back().object_id);
     }
-    return s.object_id;
+    return segments.back().object_id;
 }
 
-int Scene::add_circle(Vec2 center, float radius, int material_id) {
+int Scene::add_circle(Vec2 center, float radius, Material material) {
     Circle c;
     c.center = center;
     c.radius = std::max(0.02f, radius);
-    c.material_id = material_id;
+    c.material = std::move(material);
     c.object_id = static_cast<int>(circles.size());
-    circles.push_back(c);
-    return c.object_id;
+    circles.push_back(std::move(c));
+    return circles.back().object_id;
 }
 
 void Scene::erase_segment(int segment_id) {
@@ -126,7 +111,7 @@ HitInfo Scene::intersect(const Ray2& ray, float min_t, float max_t) const {
         best.position = ray.origin + ray.dir * t;
         best.normal = segment.normal;
         best.object_id = segment.object_id;
-        best.material_id = segment.material_id;
+        best.material = &segment.material;
         best.primitive_kind = PrimitiveKind::Segment;
     }
 
@@ -154,7 +139,7 @@ HitInfo Scene::intersect(const Ray2& ray, float min_t, float max_t) const {
         best.position = ray.origin + ray.dir * t;
         best.normal = normalize(best.position - circle.center);
         best.object_id = circle.object_id;
-        best.material_id = circle.material_id;
+        best.material = &circle.material;
         best.primitive_kind = PrimitiveKind::Circle;
     }
 
@@ -201,12 +186,11 @@ LightSample Scene::sample_light(float u_select, float u_segment) const {
     }
 
     const Segment& light = segments[chosen];
-    const Material& material = materials[light.material_id];
     sample.position = lerp(light.a, light.b, u_segment);
     sample.normal = light.normal;
-    sample.emission = material.emission;
+    sample.emission = light.material.emission;
     sample.pdf_length = total > 0.0f ? 1.0f / total : 0.0f;
-    sample.emission_angle_deg = material.emission_angle_deg;
+    sample.emission_angle_deg = light.material.emission_angle_deg;
     sample.light_object_id = light.object_id;
     return sample;
 }
@@ -214,11 +198,11 @@ LightSample Scene::sample_light(float u_select, float u_segment) const {
 Scene make_default_scene() {
     Scene scene;
 
-    const int white = scene.add_material({"white diffuse", make_color(0.78f, 0.78f, 0.74f), make_color(0.0f), MaterialKind::Diffuse, 1.0f});
-    const int red = scene.add_material({"red diffuse", make_color(0.90f, 0.25f, 0.20f), make_color(0.0f), MaterialKind::Diffuse, 1.0f});
-    const int blue = scene.add_material({"blue diffuse", make_color(0.25f, 0.35f, 0.95f), make_color(0.0f), MaterialKind::Diffuse, 1.0f});
-    const int glass = scene.add_material({"glass dielectric", make_color(0.96f, 0.98f, 1.0f), make_color(0.0f), MaterialKind::Dielectric, 1.5f});
-    const int light = scene.add_material({"area light", make_color(0.0f), make_color(8.0f, 7.5f, 6.5f), MaterialKind::Diffuse, 1.0f});
+    const Material white{"white diffuse", make_color(0.78f, 0.78f, 0.74f), make_color(0.0f), MaterialKind::Diffuse, 1.0f};
+    const Material red{"red diffuse", make_color(0.90f, 0.25f, 0.20f), make_color(0.0f), MaterialKind::Diffuse, 1.0f};
+    const Material blue{"blue diffuse", make_color(0.25f, 0.35f, 0.95f), make_color(0.0f), MaterialKind::Diffuse, 1.0f};
+    const Material glass{"glass dielectric", make_color(0.96f, 0.98f, 1.0f), make_color(0.0f), MaterialKind::Dielectric, 1.5f};
+    const Material light{"area light", make_color(0.0f), make_color(8.0f, 7.5f, 6.5f), MaterialKind::Diffuse, 1.0f};
 
     // A tiny 2D Cornell-box-like scene. Segment normals point into the room.
     scene.add_segment({-3.0f, -2.0f}, { 3.0f, -2.0f}, { 0.0f,  1.0f}, white); // floor

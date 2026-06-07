@@ -147,7 +147,7 @@ void trace_one_photon(
             return;
         }
 
-        const Material& material = scene.materials[hit.material_id];
+        const Material& material = *hit.material;
         if (material.is_light()) {
             return;
         }
@@ -338,7 +338,7 @@ Color trace_recursive(
         return make_color(0.0f);
     }
 
-    const Material& material = scene.materials[hit.material_id];
+    const Material& material = *hit.material;
     const Vec2 shading_normal = face_forward(hit.normal, -ray.dir);
 
     if (debug) {

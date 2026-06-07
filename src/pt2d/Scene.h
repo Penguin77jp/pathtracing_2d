@@ -29,14 +29,14 @@ struct Segment {
     Vec2 a;
     Vec2 b;
     Vec2 normal;
-    int material_id = 0;
+    Material material;
     int object_id = -1;
 };
 
 struct Circle {
     Vec2 center;
     float radius = 0.5f;
-    int material_id = 0;
+    Material material;
     int object_id = -1;
 };
 
@@ -52,7 +52,7 @@ struct HitInfo {
     Vec2 position;
     Vec2 normal;
     int object_id = -1;
-    int material_id = -1;
+    const Material* material = nullptr;
     PrimitiveKind primitive_kind = PrimitiveKind::None;
 };
 
@@ -67,15 +67,12 @@ struct LightSample {
 
 class Scene {
 public:
-    std::vector<Material> materials;
     std::vector<Segment> segments;
     std::vector<Circle> circles;
     std::vector<int> light_segment_ids;
 
-    int add_material(Material material);
-    int find_material_by_name(const std::string& name) const;
-    int add_segment(Vec2 a, Vec2 b, Vec2 normal, int material_id);
-    int add_circle(Vec2 center, float radius, int material_id);
+    int add_segment(Vec2 a, Vec2 b, Vec2 normal, Material material);
+    int add_circle(Vec2 center, float radius, Material material);
     void erase_segment(int segment_id);
     void erase_circle(int circle_id);
     void rebuild_object_ids();

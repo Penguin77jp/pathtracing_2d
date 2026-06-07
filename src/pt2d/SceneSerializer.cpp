@@ -1,5 +1,6 @@
 #include "pt2d/SceneSerializer.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
@@ -366,6 +367,43 @@ bool read_color(const JsonValue& object, const std::string& key, Color& out) {
     return true;
 }
 
+void write_indent(std::ostream& os, int indent) {
+    for (int i = 0; i < indent; ++i) {
+        os << ' ';
+    }
+}
+
+void write_material(std::ostream& os, const Material& m, int indent) {
+    const int inner = indent + 2;
+    os << "{\n";
+    write_indent(os, inner); os << "\"kind\": \"" << material_kind_to_string(m.kind) << "\",\n";
+    write_indent(os, inner); os << "\"albedo\": "; write_color(os, m.albedo); os << ",\n";
+    write_indent(os, inner); os << "\"emission\": "; write_color(os, m.emission); os << ",\n";
+    write_indent(os, inner); os << "\"ior\": " << m.ior << ",\n";
+    write_indent(os, inner); os << "\"emission_angle_deg\": " << m.emission_angle_deg << "\n";
+    write_indent(os, indent); os << "}";
+}
+
+bool read_material_object(const JsonValue& value, Material& material, std::string* error_message) {
+    if (value.type != JsonValue::Type::Object) {
+        if (error_message) *error_message = "material must be an object";
+        return false;
+    }
+
+    std::string kind;
+    read_string(value, "name", material.name);
+    if (read_string(value, "kind", kind)) {
+        material.kind = material_kind_from_string(kind);
+    }
+    read_color(value, "albedo", material.albedo);
+    read_color(value, "emission", material.emission);
+    read_number(value, "ior", material.ior);
+    read_number(value, "emission_angle_deg", material.emission_angle_deg);
+    material.ior = std::max(1.0f, material.ior);
+    material.emission_angle_deg = std::max(0.0f, std::min(360.0f, material.emission_angle_deg));
+    return true;
+}
+
 } // namespace
 
 bool save_scene_json(const std::string& path, const Scene& scene, const SceneDocumentSettings& settings, std::string* error_message) {
@@ -377,7 +415,7 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
 
     out << std::setprecision(9);
     out << "{\n";
-    out << "  \"version\": 1,\n";
+    out << "  \"version\": 2,\n";
     out << "  \"renderer\": {\n";
     out << "    \"integrator\": \"" << integrator_kind_to_string(settings.integrator.kind) << "\",\n";
     out << "    \"max_depth\": " << settings.integrator.max_depth << ",\n";
@@ -387,6 +425,10 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
     out << "    \"photon_gather_radius\": " << settings.integrator.photon_mapping.gather_radius << ",\n";
     out << "    \"photon_strength\": " << settings.integrator.photon_mapping.strength << ",\n";
     out << "    \"photon_caustics_only\": " << (settings.integrator.photon_mapping.caustics_only ? "true" : "false") << ",\n";
+    out << "    \"ris_num_bins\": " << settings.integrator.ris_direction.num_bins << ",\n";
+    out << "    \"ris_exploration_percent\": " << settings.integrator.ris_direction.min_probability_percent << ",\n";
+    out << "    \"ris_smooth_sigma_deg\": " << settings.integrator.ris_direction.smooth_sigma_deg << ",\n";
+    out << "    \"ris_candidate_count\": " << settings.integrator.ris_direction.candidate_count << ",\n";
     out << "    \"field_width\": " << settings.field_width << ",\n";
     out << "    \"field_height\": " << settings.field_height << ",\n";
     out << "    \"field_bounds_min\": "; write_vec2(out, settings.field_bounds_min); out << ",\n";
@@ -395,20 +437,6 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
     out << "    \"stop_after_samples\": " << settings.stop_after_samples << "\n";
     out << "  },\n";
 
-    out << "  \"materials\": [\n";
-    for (std::size_t i = 0; i < scene.materials.size(); ++i) {
-        const Material& m = scene.materials[i];
-        out << "    {\n";
-        out << "      \"name\": \"" << escape_json_string(m.name) << "\",\n";
-        out << "      \"kind\": \"" << material_kind_to_string(m.kind) << "\",\n";
-        out << "      \"albedo\": "; write_color(out, m.albedo); out << ",\n";
-        out << "      \"emission\": "; write_color(out, m.emission); out << ",\n";
-        out << "      \"ior\": " << m.ior << ",\n";
-        out << "      \"emission_angle_deg\": " << m.emission_angle_deg << "\n";
-        out << "    }" << (i + 1 == scene.materials.size() ? "\n" : ",\n");
-    }
-    out << "  ],\n";
-
     out << "  \"segments\": [\n";
     for (std::size_t i = 0; i < scene.segments.size(); ++i) {
         const Segment& s = scene.segments[i];
@@ -416,7 +444,7 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
         out << "      \"a\": "; write_vec2(out, s.a); out << ",\n";
         out << "      \"b\": "; write_vec2(out, s.b); out << ",\n";
         out << "      \"normal\": "; write_vec2(out, s.normal); out << ",\n";
-        out << "      \"material\": " << s.material_id << "\n";
+        out << "      \"material\": "; write_material(out, s.material, 6); out << "\n";
         out << "    }" << (i + 1 == scene.segments.size() ? "\n" : ",\n");
     }
     out << "  ],\n";
@@ -427,7 +455,7 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
         out << "    {\n";
         out << "      \"center\": "; write_vec2(out, c.center); out << ",\n";
         out << "      \"radius\": " << c.radius << ",\n";
-        out << "      \"material\": " << c.material_id << "\n";
+        out << "      \"material\": "; write_material(out, c.material, 6); out << "\n";
         out << "    }" << (i + 1 == scene.circles.size() ? "\n" : ",\n");
     }
     out << "  ]\n";
@@ -484,43 +512,16 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
         read_number(*renderer, "photon_gather_radius", next_settings.integrator.photon_mapping.gather_radius);
         read_number(*renderer, "photon_strength", next_settings.integrator.photon_mapping.strength);
         read_bool(*renderer, "photon_caustics_only", next_settings.integrator.photon_mapping.caustics_only);
+        read_number(*renderer, "ris_num_bins", next_settings.integrator.ris_direction.num_bins);
+        read_number(*renderer, "ris_exploration_percent", next_settings.integrator.ris_direction.min_probability_percent);
+        read_number(*renderer, "ris_smooth_sigma_deg", next_settings.integrator.ris_direction.smooth_sigma_deg);
+        read_number(*renderer, "ris_candidate_count", next_settings.integrator.ris_direction.candidate_count);
         read_number(*renderer, "field_width", next_settings.field_width);
         read_number(*renderer, "field_height", next_settings.field_height);
         read_vec2(*renderer, "field_bounds_min", next_settings.field_bounds_min);
         read_vec2(*renderer, "field_bounds_max", next_settings.field_bounds_max);
         read_number(*renderer, "samples_per_frame", next_settings.samples_per_frame);
         read_number(*renderer, "stop_after_samples", next_settings.stop_after_samples);
-    }
-
-    const JsonValue* materials = root.get("materials");
-    if (!materials || materials->type != JsonValue::Type::Array) {
-        if (error_message) *error_message = "Scene file is missing materials array";
-        return false;
-    }
-    for (const JsonValue& value : materials->array_value) {
-        if (value.type != JsonValue::Type::Object) {
-            if (error_message) *error_message = "Every material must be an object";
-            return false;
-        }
-        Material m;
-        std::string kind;
-        read_string(value, "name", m.name);
-        if (m.name.empty()) {
-            m.name = "material " + std::to_string(next_scene.materials.size());
-        }
-        if (read_string(value, "kind", kind)) {
-            m.kind = material_kind_from_string(kind);
-        }
-        read_color(value, "albedo", m.albedo);
-        read_color(value, "emission", m.emission);
-        read_number(value, "ior", m.ior);
-        read_number(value, "emission_angle_deg", m.emission_angle_deg);
-        if (m.ior < 1.0f) m.ior = 1.0f;
-        m.emission_angle_deg = std::max(0.0f, std::min(360.0f, m.emission_angle_deg));
-        next_scene.add_material(m);
-    }
-    if (next_scene.materials.empty()) {
-        next_scene.add_material({"white diffuse", make_color(0.78f), make_color(0.0f), MaterialKind::Diffuse, 1.0f});
     }
 
     const JsonValue* segments = root.get("segments");
@@ -531,12 +532,18 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
             read_vec2(value, "a", s.a);
             read_vec2(value, "b", s.b);
             read_vec2(value, "normal", s.normal);
-            read_number(value, "material", s.material_id);
-            s.material_id = std::max(0, std::min(s.material_id, static_cast<int>(next_scene.materials.size()) - 1));
+            const JsonValue* material = value.get("material");
+            if (!material) {
+                if (error_message) *error_message = "Every segment must have a material object";
+                return false;
+            }
+            if (!read_material_object(*material, s.material, error_message)) {
+                return false;
+            }
             if (length_squared(s.normal) <= 1.0e-10f) {
                 s.normal = normalize(perpendicular(s.b - s.a));
             }
-            next_scene.add_segment(s.a, s.b, s.normal, s.material_id);
+            next_scene.add_segment(s.a, s.b, s.normal, s.material);
         }
     }
 
@@ -547,10 +554,16 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
             Circle c;
             read_vec2(value, "center", c.center);
             read_number(value, "radius", c.radius);
-            read_number(value, "material", c.material_id);
+            const JsonValue* material = value.get("material");
+            if (!material) {
+                if (error_message) *error_message = "Every circle must have a material object";
+                return false;
+            }
+            if (!read_material_object(*material, c.material, error_message)) {
+                return false;
+            }
             c.radius = std::max(0.02f, c.radius);
-            c.material_id = std::max(0, std::min(c.material_id, static_cast<int>(next_scene.materials.size()) - 1));
-            next_scene.add_circle(c.center, c.radius, c.material_id);
+            next_scene.add_circle(c.center, c.radius, c.material);
         }
     }
 
@@ -560,6 +573,10 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
     next_settings.integrator.photon_mapping.photon_max_depth = std::max(1, next_settings.integrator.photon_mapping.photon_max_depth);
     next_settings.integrator.photon_mapping.gather_radius = std::max(0.001f, next_settings.integrator.photon_mapping.gather_radius);
     next_settings.integrator.photon_mapping.strength = std::max(0.0f, next_settings.integrator.photon_mapping.strength);
+    next_settings.integrator.ris_direction.num_bins = std::clamp(next_settings.integrator.ris_direction.num_bins, 1, 256);
+    next_settings.integrator.ris_direction.min_probability_percent = std::clamp(next_settings.integrator.ris_direction.min_probability_percent, 0.0f, 100.0f);
+    next_settings.integrator.ris_direction.smooth_sigma_deg = std::clamp(next_settings.integrator.ris_direction.smooth_sigma_deg, 0, 180);
+    next_settings.integrator.ris_direction.candidate_count = std::clamp(next_settings.integrator.ris_direction.candidate_count, 1, 128);
     next_settings.field_width = std::max(1, next_settings.field_width);
     next_settings.field_height = std::max(1, next_settings.field_height);
     next_settings.samples_per_frame = std::max(1, next_settings.samples_per_frame);

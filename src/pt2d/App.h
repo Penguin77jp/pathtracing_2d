@@ -93,10 +93,10 @@ private:
     float distance_to_segment(Vec2 p, Vec2 a, Vec2 b) const;
     void select_scene_handle(Vec2 world, float radius_world);
     void mark_scene_edited();
-    int ensure_material(const char* name, Material material);
-    int default_wall_material() const;
-    int default_light_material() const;
-    int default_glass_material() const;
+    bool draw_material_editor(Material& material);
+    Material default_wall_material() const;
+    Material default_light_material() const;
+    Material default_glass_material() const;
     void clear_selection();
 
     GLFWwindow* m_window = nullptr;
@@ -122,6 +122,7 @@ private:
     bool m_show_debug_labels = true;
     bool m_show_normals = true;
     bool m_show_reservoir_debug = false;
+    int m_debug_ray_display_max_depth = 3;
     int m_samples_per_frame = 1;
     int m_stop_after_samples = 0; // 0 = infinite
     int m_field_width = 320;
