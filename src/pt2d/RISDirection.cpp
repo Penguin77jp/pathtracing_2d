@@ -4,16 +4,14 @@
 #include <numbers>
 #include <cmath>
 #include <optional>
+#include <algorithm>
 
 namespace pt2d {
-	RISDirection::RISDirection(const int num_bins, const int exploration_percent, const int smooth_sigma_deg, uint64_t seed)
-		: m_num_bins(num_bins), m_smooth_sigma_deg(smooth_sigma_deg), m_sampler(Sampler(seed)) {
+	RISDirection::RISDirection(const int num_bins, const float exploration_percent, const int smooth_sigma_deg, uint64_t seed)
+		: m_num_bins(std::max(1, num_bins)), m_smooth_sigma_deg(std::max(0, smooth_sigma_deg)), m_sampler(Sampler(seed)) {
 
-		m_bin_width = 2.0 * std::numbers::pi / static_cast<float>(m_num_bins);
-		if (exploration_percent < 0 || exploration_percent > 100) {
-			throw std::invalid_argument("exploration_percent should be in [0, 100].");
-		}
-		m_exploration_prob = 0.01f * exploration_percent;
+		m_bin_width = 2.0f * std::numbers::pi_v<float> / static_cast<float>(m_num_bins);
+		m_exploration_prob = 0.01f * std::clamp(exploration_percent, 0.0f, 100.0f);
 		m_score.resize(static_cast<size_t>(m_num_bins), 0.0f);
 	}
 

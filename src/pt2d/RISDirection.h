@@ -16,7 +16,7 @@ namespace pt2d {
 			float pdf;
 		};
 	public:
-		RISDirection(const int num_bins, const int exploration_percent, const int smooth_sigma_deg, uint64_t seed);
+		RISDirection(const int num_bins, const float exploration_percent, const int smooth_sigma_deg, uint64_t seed);
 		AngularSample sample();
 		void update(const float theta, float weighted_contributions);
 		void update(std::vector<AngularSample>& angular_samples, std::vector<Color>& weighed_contributions);

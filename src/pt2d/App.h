@@ -36,6 +36,7 @@ public:
     Vec2 sample_position_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const;
     uint64_t seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const;
     bool world_to_pixel(Vec2 p, int& x, int& y) const;
+    RISDirection* ris_direction_for_pixel(int x, int y, const IntegratorSettings& settings);
 
     unsigned int texture_id() const { return m_texture_id; }
     int width() const { return m_width; }
@@ -46,6 +47,7 @@ public:
 
 private:
     void update_rgba_buffer();
+    void ensure_ris_directions(const IntegratorSettings& settings);
 
     int m_width = 320;
     int m_height = 224;

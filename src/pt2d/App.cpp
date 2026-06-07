@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -105,6 +106,7 @@ void FieldAccumulator::reset(int width, int height, FieldBounds bounds) {
     m_last_photon_count = 0;
     m_accum.assign(static_cast<size_t>(m_width * m_height), make_color(0.0f));
     m_rgba.assign(static_cast<size_t>(m_width * m_height * 4), 0);
+    m_ris_direction.clear();
 
     if (m_texture_id == 0) {
         glGenTextures(1, &m_texture_id);
@@ -155,6 +157,40 @@ bool FieldAccumulator::world_to_pixel(Vec2 p, int& x, int& y) const {
     return inside;
 }
 
+void FieldAccumulator::ensure_ris_directions(const IntegratorSettings& settings) {
+    const size_t pixel_count = static_cast<size_t>(m_width * m_height);
+    if (m_ris_direction.size() == pixel_count) {
+        return;
+    }
+
+    m_ris_direction.clear();
+    m_ris_direction.reserve(pixel_count);
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            const uint64_t ris_seed = seed_for_pixel(x, y, 0, settings) ^ 0x7269736469726563ULL;
+            m_ris_direction.emplace_back(
+                settings.ris_direction.num_bins,
+                settings.ris_direction.min_probability_percent,
+                settings.ris_direction.smooth_sigma_deg,
+                ris_seed);
+        }
+    }
+}
+
+RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y, const IntegratorSettings& settings) {
+    if (settings.kind != IntegratorKind::RISDirection) {
+        return nullptr;
+    }
+    if (m_width <= 0 || m_height <= 0) {
+        return nullptr;
+    }
+
+    ensure_ris_directions(settings);
+    x = std::clamp(x, 0, m_width - 1);
+    y = std::clamp(y, 0, m_height - 1);
+    return &m_ris_direction[static_cast<size_t>(y * m_width + x)];
+}
+
 void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame) {
     if (m_accum.empty()) {
         reset(m_width, m_height, m_bounds);
@@ -165,15 +201,11 @@ void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& 
         m_last_photon_count = 0;
     }
     
-    // init ris directions
-    if (settings.kind == IntegratorKind::RISDirection && settings.ris_direction.need_init) {
-        for (int y = 0; y < m_height; ++y) {
-            for (int x = 0; x < m_width; ++x) {
-                const uint64_t ris_seed = seed_for_pixel(x, y, 0, settings) ^ 0x7269736469726563ULL;
-                m_ris_direction.emplace_back(settings.ris_direction.num_bins, settings.ris_direction.min_probability_percent, settings.ris_direction.smooth_sigma_deg, ris_seed);
-            }
-        }
-	}
+    if (settings.kind == IntegratorKind::RISDirection) {
+        ensure_ris_directions(settings);
+    } else {
+        m_ris_direction.clear();
+    }
 
     for (int s = 0; s < spp; ++s) {
         const int sample_index = m_samples + s;
@@ -191,7 +223,7 @@ void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& 
             for (int x = 0; x < m_width; ++x) {
                 Sampler sampler(seed_for_pixel(x, y, sample_index, settings));
                 const Vec2 position = pixel_center_to_world(x, y);
-				RISDirection* ris_direction_ptr = nullptr;
+                RISDirection* ris_direction_ptr = nullptr;
                 if (settings.kind == IntegratorKind::RISDirection) {
                     ris_direction_ptr = &m_ris_direction[static_cast<size_t>(y * m_width + x)];
                 }
@@ -416,6 +448,20 @@ void App::draw_field_panel() {
     if (ImGui::InputInt("Seed", &seed_as_int)) {
         m_settings.seed = static_cast<uint64_t>(std::max(1, seed_as_int));
         changed = true;
+    }
+
+    if (m_settings.kind == IntegratorKind::RISDirection) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("RIS direction");
+        changed |= ImGui::SliderInt("RIS num bins", &m_settings.ris_direction.num_bins, 1, 256);
+        changed |= ImGui::DragFloat("RIS exploration %", &m_settings.ris_direction.min_probability_percent, 0.5f, 0.0f, 100.0f, "%.1f");
+        changed |= ImGui::SliderInt("RIS smooth sigma deg", &m_settings.ris_direction.smooth_sigma_deg, 0, 180);
+        changed |= ImGui::SliderInt("RIS candidate count", &m_settings.ris_direction.candidate_count, 1, 128);
+        m_settings.ris_direction.num_bins = std::clamp(m_settings.ris_direction.num_bins, 1, 256);
+        m_settings.ris_direction.min_probability_percent = std::clamp(m_settings.ris_direction.min_probability_percent, 0.0f, 100.0f);
+        m_settings.ris_direction.smooth_sigma_deg = std::clamp(m_settings.ris_direction.smooth_sigma_deg, 0, 180);
+        m_settings.ris_direction.candidate_count = std::clamp(m_settings.ris_direction.candidate_count, 1, 128);
+        ImGui::TextWrapped("RIS direction learns a per-pixel angular distribution. Changing these settings resets accumulation and rebuilds the RIS state.");
     }
 
     if (m_settings.kind == IntegratorKind::PhotonMapping) {
@@ -1011,7 +1057,28 @@ void App::retrace_debug_sample() {
         photon_map_ptr = &photon_map;
     }
 
-    estimate_at(m_scene, m_debug_world_position, sampler, m_settings, &m_debug_recorder, photon_map_ptr);
+    std::optional<RISDirection> debug_ris_direction;
+    RISDirection* ris_direction_ptr = nullptr;
+    if (m_settings.kind == IntegratorKind::RISDirection) {
+        if (m_debug_uses_selected_pixel) {
+            if (RISDirection* trained_ris = m_field.ris_direction_for_pixel(m_selected_pixel_x, m_selected_pixel_y, m_settings)) {
+                debug_ris_direction = *trained_ris;
+            }
+        } else {
+            const uint64_t ris_seed = world_sample_seed(m_settings, m_debug_world_position, 0) ^ 0x7269736469726563ULL;
+            debug_ris_direction.emplace(
+                m_settings.ris_direction.num_bins,
+                m_settings.ris_direction.min_probability_percent,
+                m_settings.ris_direction.smooth_sigma_deg,
+                ris_seed);
+        }
+
+        if (debug_ris_direction.has_value()) {
+            ris_direction_ptr = &debug_ris_direction.value();
+        }
+    }
+
+    estimate_at(m_scene, m_debug_world_position, sampler, m_settings, &m_debug_recorder, photon_map_ptr, ris_direction_ptr);
 }
 
 
