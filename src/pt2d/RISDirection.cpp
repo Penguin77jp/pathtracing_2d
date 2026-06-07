@@ -82,6 +82,43 @@ namespace pt2d {
 		return static_cast<int>(N - 1);
 	}
 
+
+	float RISDirection::score_sum() const {
+		return sum_vector(m_score);
+	}
+
+	std::vector<float> RISDirection::probabilities() const {
+		std::vector<float> smoothed_score = circular_smoothed_score();
+		const float score_sum = sum_vector(smoothed_score);
+		std::vector<float> bin_prob(static_cast<size_t>(m_num_bins), 0.0f);
+
+		if (m_num_bins <= 0) {
+			return bin_prob;
+		}
+
+		const float uniform_bin_prob = 1.0f / static_cast<float>(m_num_bins);
+		if (score_sum <= 0.0f) {
+			std::fill(bin_prob.begin(), bin_prob.end(), uniform_bin_prob);
+			return bin_prob;
+		}
+
+		for (int i = 0; i < m_num_bins; ++i) {
+			const float learned =
+				std::max(0.0f, smoothed_score[static_cast<size_t>(i)]) / score_sum;
+			bin_prob[static_cast<size_t>(i)] =
+				(1.0f - m_exploration_prob) * learned
+				+ m_exploration_prob * uniform_bin_prob;
+		}
+
+		const float prob_sum = sum_vector(bin_prob);
+		if (prob_sum > 0.0f && std::isfinite(prob_sum)) {
+			for (float& p : bin_prob) {
+				p /= prob_sum;
+			}
+		}
+		return bin_prob;
+	}
+
 	RISDirection::AngularSample RISDirection::sample() {
 		std::vector<float> smoothed_score = circular_smoothed_score();
 		float score_sum = sum_vector(smoothed_score);

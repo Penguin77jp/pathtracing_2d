@@ -20,6 +20,12 @@ namespace pt2d {
 		AngularSample sample();
 		void update(const float theta, float weighted_contributions);
 		void update(std::vector<AngularSample>& angular_samples, std::vector<Color>& weighed_contributions);
+
+		int num_bins() const { return m_num_bins; }
+		float bin_width() const { return m_bin_width; }
+		const std::vector<float>& scores() const { return m_score; }
+		std::vector<float> probabilities() const;
+		float score_sum() const;
 	private:
 		size_t bin_index(const float theta) const;
 		std::vector<float> circular_smoothed_score() const;

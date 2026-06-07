@@ -191,6 +191,19 @@ RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y, const Inte
     return &m_ris_direction[static_cast<size_t>(y * m_width + x)];
 }
 
+const RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y) const {
+    if (m_width <= 0 || m_height <= 0) {
+        return nullptr;
+    }
+    if (m_ris_direction.size() != static_cast<size_t>(m_width * m_height)) {
+        return nullptr;
+    }
+
+    x = std::clamp(x, 0, m_width - 1);
+    y = std::clamp(y, 0, m_height - 1);
+    return &m_ris_direction[static_cast<size_t>(y * m_width + x)];
+}
+
 void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame) {
     if (m_accum.empty()) {
         reset(m_width, m_height, m_bounds);
@@ -370,6 +383,7 @@ void App::run() {
         draw_main_menu();
         draw_field_panel();
         draw_scene_panel();
+        draw_reservoir_windows();
 
         ImGui::Render();
         int display_w = 0;
@@ -604,8 +618,10 @@ void App::draw_scene_panel() {
     ImGui::Checkbox("Normals", &m_show_normals);
     ImGui::SameLine();
     ImGui::Checkbox("Labels", &m_show_debug_labels);
+    ImGui::SameLine();
+    ImGui::Checkbox("Reservoir", &m_show_reservoir_debug);
 
-    ImGui::TextWrapped("Image click: select a field pixel. Canvas click near an object: select/edit it. Canvas click empty space: debug exact world position. Drag selected handles to modify geometry. Right drag pans, mouse wheel zooms.");
+    ImGui::TextWrapped("Image click: select a field pixel. Canvas click near an object: select/edit it. Canvas click empty space: debug exact world position. Drag selected handles to modify geometry. Right drag pans, mouse wheel zooms. Reservoir opens a RIS distribution window for clicked field pixels while RIS direction is active.");
     draw_canvas();
 
     ImGui::End();
@@ -851,6 +867,15 @@ void App::draw_canvas() {
                 m_selected_pixel_y = py;
                 m_debug_uses_selected_pixel = true;
                 m_debug_world_position = m_field.pixel_center_to_world(px, py);
+                if (m_show_reservoir_debug && m_settings.kind == IntegratorKind::RISDirection) {
+                    m_reservoir_windows.push_back({
+                        m_next_reservoir_window_id++,
+                        true,
+                        px,
+                        py,
+                        m_debug_world_position
+                    });
+                }
             } else {
                 m_debug_uses_selected_pixel = false;
                 m_debug_world_position = world;
@@ -1033,6 +1058,136 @@ void App::draw_debug_events() {
                 break;
         }
     }
+}
+
+void App::draw_reservoir_polar_plot(const RISDirection& ris_direction, ImVec2 size) {
+    size.x = std::max(size.x, 220.0f);
+    size.y = std::max(size.y, 220.0f);
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(size);
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImVec2 max{origin.x + size.x, origin.y + size.y};
+    draw_list->AddRectFilled(origin, max, rgba(14, 15, 18));
+    draw_list->AddRect(origin, max, rgba(70, 75, 86));
+
+    const ImVec2 center{origin.x + size.x * 0.5f, origin.y + size.y * 0.5f};
+    const float radius = std::max(1.0f, std::min(size.x, size.y) * 0.42f);
+
+    for (int i = 1; i <= 3; ++i) {
+        draw_list->AddCircle(center, radius * static_cast<float>(i) / 3.0f, rgba(65, 70, 82), 64, 1.0f);
+    }
+
+    draw_list->AddLine(ImVec2{center.x - radius, center.y}, ImVec2{center.x + radius, center.y}, rgba(80, 86, 100), 1.0f);
+    draw_list->AddLine(ImVec2{center.x, center.y - radius}, ImVec2{center.x, center.y + radius}, rgba(80, 86, 100), 1.0f);
+    draw_list->AddText(ImVec2{center.x + radius + 6.0f, center.y - 7.0f}, rgba(170, 176, 190), "0");
+    draw_list->AddText(ImVec2{center.x - 10.0f, center.y - radius - 18.0f}, rgba(170, 176, 190), "90");
+    draw_list->AddText(ImVec2{center.x - radius - 24.0f, center.y - 7.0f}, rgba(170, 176, 190), "180");
+    draw_list->AddText(ImVec2{center.x - 14.0f, center.y + radius + 4.0f}, rgba(170, 176, 190), "270");
+
+    const std::vector<float> probabilities = ris_direction.probabilities();
+    const int num_bins = static_cast<int>(probabilities.size());
+    if (num_bins <= 0) {
+        draw_list->AddText(ImVec2{origin.x + 12.0f, origin.y + 12.0f}, rgba(255, 150, 120), "No RIS data");
+        return;
+    }
+
+    float max_probability = 0.0f;
+    int max_bin = 0;
+    for (int i = 0; i < num_bins; ++i) {
+        if (probabilities[static_cast<size_t>(i)] > max_probability) {
+            max_probability = probabilities[static_cast<size_t>(i)];
+            max_bin = i;
+        }
+    }
+
+    if (max_probability <= 0.0f || !std::isfinite(max_probability)) {
+        return;
+    }
+
+    std::vector<ImVec2> endpoints;
+    endpoints.reserve(static_cast<size_t>(num_bins));
+    for (int i = 0; i < num_bins; ++i) {
+        const float theta = (static_cast<float>(i) + 0.5f) * ris_direction.bin_width();
+        const float normalized = std::clamp(probabilities[static_cast<size_t>(i)] / max_probability, 0.0f, 1.0f);
+        const float r = radius * normalized;
+        const ImVec2 endpoint{center.x + std::cos(theta) * r, center.y - std::sin(theta) * r};
+        endpoints.push_back(endpoint);
+        draw_list->AddLine(center, endpoint, rgba(120, 185, 255, 120), 1.0f);
+    }
+
+    for (int i = 0; i < num_bins; ++i) {
+        const ImVec2 a = endpoints[static_cast<size_t>(i)];
+        const ImVec2 b = endpoints[static_cast<size_t>((i + 1) % num_bins)];
+        draw_list->AddLine(a, b, rgba(120, 210, 255), 2.0f);
+    }
+
+    const float max_theta = (static_cast<float>(max_bin) + 0.5f) * ris_direction.bin_width();
+    const ImVec2 max_endpoint{center.x + std::cos(max_theta) * radius, center.y - std::sin(max_theta) * radius};
+    draw_list->AddLine(center, max_endpoint, rgba(255, 190, 90), 3.0f);
+}
+
+void App::draw_reservoir_windows() {
+    for (ReservoirDebugWindow& window : m_reservoir_windows) {
+        if (!window.open) {
+            continue;
+        }
+
+        char title[128];
+        std::snprintf(title, sizeof(title), "RIS Reservoir (%d, %d)###ris_reservoir_%d", window.pixel_x, window.pixel_y, window.id);
+        if (!ImGui::Begin(title, &window.open)) {
+            ImGui::End();
+            continue;
+        }
+
+        ImGui::Text("Pixel: (%d, %d)", window.pixel_x, window.pixel_y);
+        ImGui::Text("World: %.3f, %.3f", window.world_position.x, window.world_position.y);
+        ImGui::Text("Accumulated samples: %d", m_field.samples());
+
+        const RISDirection* ris_direction = nullptr;
+        if (m_settings.kind == IntegratorKind::RISDirection) {
+            ris_direction = m_field.ris_direction_for_pixel(window.pixel_x, window.pixel_y);
+        }
+
+        if (ris_direction == nullptr) {
+            ImGui::TextWrapped("No active RIS state for this pixel. Switch to RIS direction mode and render at least one sample, or reset windows after changing resolution/settings.");
+            ImGui::End();
+            continue;
+        }
+
+        const std::vector<float> probabilities = ris_direction->probabilities();
+        if (probabilities.empty()) {
+            ImGui::TextWrapped("No RIS probability data.");
+            ImGui::End();
+            continue;
+        }
+
+        float max_probability = 0.0f;
+        int max_bin = 0;
+        for (int i = 0; i < static_cast<int>(probabilities.size()); ++i) {
+            if (probabilities[static_cast<size_t>(i)] > max_probability) {
+                max_probability = probabilities[static_cast<size_t>(i)];
+                max_bin = i;
+            }
+        }
+        const float max_direction_deg = (static_cast<float>(max_bin) + 0.5f) * ris_direction->bin_width() * 180.0f / kPi;
+        ImGui::Text("Max direction: %.1f deg", max_direction_deg);
+        ImGui::Text("Max probability: %.4f", max_probability);
+        if (ris_direction->score_sum() <= 0.0f) {
+            ImGui::TextWrapped("No learned score yet. The distribution is uniform.");
+        }
+
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        const float plot_size = std::max(240.0f, std::min(available_width, 420.0f));
+        draw_reservoir_polar_plot(*ris_direction, ImVec2{plot_size, plot_size});
+        ImGui::End();
+    }
+
+    m_reservoir_windows.erase(
+        std::remove_if(m_reservoir_windows.begin(), m_reservoir_windows.end(),
+            [](const ReservoirDebugWindow& window) { return !window.open; }),
+        m_reservoir_windows.end());
 }
 
 void App::retrace_debug_sample() {

@@ -37,6 +37,7 @@ public:
     uint64_t seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const;
     bool world_to_pixel(Vec2 p, int& x, int& y) const;
     RISDirection* ris_direction_for_pixel(int x, int y, const IntegratorSettings& settings);
+    const RISDirection* ris_direction_for_pixel(int x, int y) const;
 
     unsigned int texture_id() const { return m_texture_id; }
     int width() const { return m_width; }
@@ -77,6 +78,8 @@ private:
     void draw_scene_controls();
     void draw_canvas();
     void draw_debug_events();
+    void draw_reservoir_windows();
+    void draw_reservoir_polar_plot(const RISDirection& ris_direction, ImVec2 size);
     void retrace_debug_sample();
     void reset_accumulation();
     void save_scene();
@@ -99,6 +102,14 @@ private:
     FieldAccumulator m_field;
     DebugRecorder m_debug_recorder;
 
+    struct ReservoirDebugWindow {
+        int id = 0;
+        bool open = true;
+        int pixel_x = 0;
+        int pixel_y = 0;
+        Vec2 world_position = {0.0f, 0.0f};
+    };
+
     bool m_running = true;
     bool m_render_paused = false;
     bool m_show_field_in_canvas = true;
@@ -106,6 +117,7 @@ private:
     bool m_show_debug_hits = true;
     bool m_show_debug_labels = true;
     bool m_show_normals = true;
+    bool m_show_reservoir_debug = false;
     int m_samples_per_frame = 1;
     int m_stop_after_samples = 0; // 0 = infinite
     int m_field_width = 320;
@@ -117,6 +129,8 @@ private:
     int m_debug_sample_index = 0;
     bool m_debug_uses_selected_pixel = true;
     Vec2 m_debug_world_position = {0.0f, 0.0f};
+    std::vector<ReservoirDebugWindow> m_reservoir_windows;
+    int m_next_reservoir_window_id = 1;
 
     SelectedObjectKind m_selected_kind = SelectedObjectKind::None;
     int m_selected_index = -1;
