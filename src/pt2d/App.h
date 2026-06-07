@@ -112,6 +112,7 @@ private:
     void reset_accumulation();
     void save_scene();
     void load_scene();
+    void launch_production_render_gui();
 
     ImVec2 world_to_screen(Vec2 p) const;
     Vec2 screen_to_world(ImVec2 p) const;
@@ -132,8 +133,10 @@ private:
 
     bool m_running = true;
     bool m_render_paused = false;
+    bool m_auto_compute = true;
     bool m_show_field_in_canvas = true;
     bool m_show_debug_rays = true;
+    bool m_show_hit_rays_only = false;
     bool m_show_debug_hits = true;
     bool m_show_debug_labels = true;
     bool m_show_normals = true;

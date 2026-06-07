@@ -526,6 +526,7 @@ Color estimate_at(const Scene& scene, Vec2 position, Sampler& sampler, const Int
         DirectionSample direction = sample_uniform_circle_2d(sampler);
 
         if (debug) {
+            debug->begin_path();
             DebugEvent event;
             event.type = DebugEventType::BsdfSample;
             event.depth = -1;
@@ -537,7 +538,10 @@ Color estimate_at(const Scene& scene, Vec2 position, Sampler& sampler, const Int
         }
 
         Color radiance = trace(scene, { position, direction.dir }, sampler, settings, debug, photon_map);
-     
+        if (debug) {
+            debug->end_path();
+        }
+
         return radiance;
     }
 
@@ -554,7 +558,13 @@ Color estimate_at(const Scene& scene, Vec2 position, Sampler& sampler, const Int
             angular_samples[i] = ris_direction->sample();
             const float pdf = std::max(angular_samples[i].pdf, 1.0e-8f);
 			const Vec2 dir{ std::cos(angular_samples[i].theta), std::sin(angular_samples[i].theta) };
+            if (debug) {
+                debug->begin_path();
+            }
             weighed_contributions[i] = trace(scene, { position, dir }, sampler, settings, debug, photon_map) / pdf;
+            if (debug) {
+                debug->end_path();
+            }
 		}
         // TODO : ris update
 		ris_direction->update(angular_samples, weighed_contributions);

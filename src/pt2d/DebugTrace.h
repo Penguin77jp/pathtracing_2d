@@ -46,17 +46,39 @@ struct DebugEvent {
 
     int object_id = -1;
     int sampled_object_id = -1;
+    int path_id = -1;
 };
 
 class DebugRecorder {
 public:
-    void clear() { events_.clear(); }
+    void clear() {
+        events_.clear();
+        current_path_id_ = -1;
+        next_path_id_ = 0;
+    }
+
     const std::vector<DebugEvent>& events() const { return events_; }
 
-    void add(DebugEvent event) { events_.push_back(event); }
+    int begin_path() {
+        current_path_id_ = next_path_id_++;
+        return current_path_id_;
+    }
+
+    void end_path() { current_path_id_ = -1; }
+
+    int current_path_id() const { return current_path_id_; }
+
+    void add(DebugEvent event) {
+        if (event.path_id < 0) {
+            event.path_id = current_path_id_;
+        }
+        events_.push_back(event);
+    }
 
 private:
     std::vector<DebugEvent> events_;
+    int current_path_id_ = -1;
+    int next_path_id_ = 0;
 };
 
 } // namespace pt2d

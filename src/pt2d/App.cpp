@@ -2,12 +2,34 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <optional>
+#include <string>
+#include <system_error>
 #include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <cstring>
+#include <spawn.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+extern char** environ;
+#endif
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -23,6 +45,169 @@
 namespace pt2d {
 
 namespace {
+
+std::filesystem::path current_executable_path(std::string* error) {
+#ifdef _WIN32
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size()) {
+        if (error) {
+            *error = "Failed to get executable path";
+        }
+        return {};
+    }
+    return std::filesystem::path(std::wstring(buffer.data(), buffer.data() + length));
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(static_cast<std::size_t>(size) + 1, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        if (error) {
+            *error = "Failed to get executable path";
+        }
+        return {};
+    }
+    std::error_code ec;
+    auto path = std::filesystem::weakly_canonical(std::filesystem::path(buffer.data()), ec);
+    return ec ? std::filesystem::absolute(std::filesystem::path(buffer.data())) : path;
+#elif defined(__linux__)
+    std::vector<char> buffer(4096, '\0');
+    const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+    if (length <= 0) {
+        if (error) {
+            *error = "Failed to get executable path";
+        }
+        return {};
+    }
+    buffer[static_cast<std::size_t>(length)] = '\0';
+    return std::filesystem::path(buffer.data());
+#else
+    if (error) {
+        *error = "Launching Production GUI is not implemented on this platform";
+    }
+    return {};
+#endif
+}
+
+std::filesystem::path make_unique_production_scene_path(std::string* error) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "pathtracing_2d_jobs";
+    if (ec) {
+        if (error) {
+            *error = "Failed to get temp directory";
+        }
+        return {};
+    }
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        if (error) {
+            *error = "Failed to create temp job directory: " + ec.message();
+        }
+        return {};
+    }
+
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        std::filesystem::path path = dir / ("production_scene_" + std::to_string(tick) + "_" + std::to_string(attempt) + ".json");
+        if (!std::filesystem::exists(path, ec)) {
+            return path;
+        }
+    }
+
+    if (error) {
+        *error = "Failed to create unique production scene path";
+    }
+    return {};
+}
+
+#ifdef _WIN32
+std::wstring quote_windows_argument(const std::wstring& arg) {
+    std::wstring result;
+    result.push_back(L'"');
+    int backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            ++backslashes;
+        } else if (c == L'"') {
+            result.append(static_cast<std::size_t>(backslashes * 2 + 1), L'\\');
+            result.push_back(c);
+            backslashes = 0;
+        } else {
+            result.append(static_cast<std::size_t>(backslashes), L'\\');
+            result.push_back(c);
+            backslashes = 0;
+        }
+    }
+    result.append(static_cast<std::size_t>(backslashes * 2), L'\\');
+    result.push_back(L'"');
+    return result;
+}
+#endif
+
+bool launch_self_production(const std::filesystem::path& scene_path, std::string* error) {
+    std::string path_error;
+    const std::filesystem::path executable = current_executable_path(&path_error);
+    if (executable.empty()) {
+        if (error) {
+            *error = path_error.empty() ? "Failed to get executable path" : path_error;
+        }
+        return false;
+    }
+
+#ifdef _WIN32
+    std::wstring command_line = quote_windows_argument(executable.wstring());
+    command_line += L" --production ";
+    command_line += quote_windows_argument(scene_path.wstring());
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::wstring mutable_command_line = command_line;
+    const BOOL ok = CreateProcessW(
+        executable.wstring().c_str(),
+        mutable_command_line.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        0,
+        nullptr,
+        executable.parent_path().wstring().c_str(),
+        &startup,
+        &process);
+
+    if (!ok) {
+        if (error) {
+            *error = "CreateProcessW failed: " + std::to_string(GetLastError());
+        }
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+#else
+    std::vector<std::string> storage;
+    storage.push_back(executable.string());
+    storage.push_back("--production");
+    storage.push_back(scene_path.string());
+
+    std::vector<char*> argv;
+    argv.reserve(storage.size() + 1);
+    for (std::string& item : storage) {
+        argv.push_back(item.data());
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = 0;
+    const int result = posix_spawn(&pid, storage[0].c_str(), nullptr, nullptr, argv.data(), environ);
+    if (result != 0) {
+        if (error) {
+            *error = std::string("posix_spawn failed: ") + std::strerror(result);
+        }
+        return false;
+    }
+    return true;
+#endif
+}
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
@@ -118,6 +303,29 @@ uint64_t world_sample_seed(const IntegratorSettings& settings, Vec2 position, in
     seed = hash_combine(seed, static_cast<uint64_t>((position.x + 1000.0f) * 1000.0f));
     seed = hash_combine(seed, static_cast<uint64_t>((position.y + 1000.0f) * 1000.0f));
     return seed;
+}
+
+
+bool is_contributing_hit_light(const DebugEvent& event) {
+    return event.type == DebugEventType::HitLight && !is_black(event.contribution);
+}
+
+bool contains_path_id(const std::vector<int>& path_ids, int path_id) {
+    return std::find(path_ids.begin(), path_ids.end(), path_id) != path_ids.end();
+}
+
+std::vector<int> recorder_contributing_light_path_ids(const DebugRecorder& recorder) {
+    std::vector<int> path_ids;
+    for (const DebugEvent& event : recorder.events()) {
+        if (is_contributing_hit_light(event) && !contains_path_id(path_ids, event.path_id)) {
+            path_ids.push_back(event.path_id);
+        }
+    }
+    return path_ids;
+}
+
+bool recorder_has_hit_light(const DebugRecorder& recorder) {
+    return !recorder_contributing_light_path_ids(recorder).empty();
 }
 
 ImU32 depth_color(int depth) {
@@ -515,6 +723,9 @@ void App::draw_main_menu() {
             if (ImGui::MenuItem("Load Scene")) {
                 load_scene();
             }
+            if (ImGui::MenuItem("Launch Production Render GUI")) {
+                launch_production_render_gui();
+            }
             if (ImGui::MenuItem("Exit")) {
                 m_running = false;
             }
@@ -555,6 +766,16 @@ void App::draw_field_panel() {
         reset_accumulation();
         retrace_debug_sample();
     }
+
+    if (ImGui::Checkbox("Auto-Comp", &m_auto_compute)) {
+        if (m_auto_compute) {
+            m_render_paused = false;
+        } else {
+            m_render_paused = true;
+        }
+    }
+    ImGui::SameLine();
+    ImGui::Text("OFF: edits reset state but do not restart computation");
 
     bool changed = false;
     changed |= ImGui::SliderInt("Max depth", &m_settings.max_depth, 1, 16);
@@ -810,6 +1031,8 @@ void App::draw_scene_panel() {
     ImGui::SameLine();
     ImGui::Checkbox("Rays", &m_show_debug_rays);
     ImGui::SameLine();
+    ImGui::Checkbox("Hit rays only", &m_show_hit_rays_only);
+    ImGui::SameLine();
     ImGui::Checkbox("Hits", &m_show_debug_hits);
     ImGui::SameLine();
     ImGui::Checkbox("Normals", &m_show_normals);
@@ -824,6 +1047,12 @@ void App::draw_scene_panel() {
         ImGui::SliderInt("Ray display max depth", &m_debug_ray_display_max_depth, 0, ray_depth_max);
         ImGui::SameLine();
         ImGui::Text("render max depth: %d", m_settings.max_depth);
+    }
+    if (m_show_hit_rays_only) {
+        ImGui::TextWrapped("Hit rays only: independently overlays light-hit path rays. It ignores Ray display max depth and does not draw NEE light-sample/shadow helper lines.");
+        if (!recorder_has_hit_light(m_debug_recorder)) {
+            ImGui::TextWrapped("Current debug sample has no contributing emissive path hit, so the hit-ray overlay draws nothing. Samples lit only by NEE/direct light sampling are not shown in this overlay.");
+        }
     }
 
     draw_debug_sample_controls();
@@ -1151,15 +1380,20 @@ void App::draw_canvas() {
 void App::draw_debug_events() {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    const auto ray_is_visible = [this](const DebugEvent& event) {
+    const std::vector<int> hit_path_ids = m_show_hit_rays_only
+        ? recorder_contributing_light_path_ids(m_debug_recorder)
+        : std::vector<int>{};
+
+    const auto regular_ray_is_visible = [this](const DebugEvent& event) {
         return m_show_debug_rays && (event.depth < 0 || event.depth <= m_debug_ray_display_max_depth);
     };
 
+    // Regular debug layer. This is independent from the light-hit ray overlay.
     for (const DebugEvent& event : m_debug_recorder.events()) {
         const ImU32 color = depth_color(event.depth);
         switch (event.type) {
             case DebugEventType::RaySegment:
-                if (ray_is_visible(event)) {
+                if (regular_ray_is_visible(event)) {
                     draw_arrow(draw_list, world_to_screen(event.ray_origin), world_to_screen(event.ray_end), color, 2.0f);
                 }
                 break;
@@ -1179,7 +1413,7 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::BsdfSample:
-                if (ray_is_visible(event)) {
+                if (regular_ray_is_visible(event)) {
                     const float len = event.depth < 0 ? 0.75f : 0.55f;
                     draw_arrow(draw_list, world_to_screen(event.hit_point), world_to_screen(event.hit_point + event.sampled_dir * len), event.depth < 0 ? rgba(255, 145, 90) : rgba(255, 210, 120), 1.5f);
                     if (m_show_debug_labels) {
@@ -1192,7 +1426,7 @@ void App::draw_debug_events() {
 
             case DebugEventType::LightSample:
                 draw_list->AddCircleFilled(world_to_screen(event.sampled_point), 5.5f, rgba(255, 240, 120));
-                if (ray_is_visible(event)) {
+                if (regular_ray_is_visible(event)) {
                     draw_list->AddLine(world_to_screen(event.hit_point), world_to_screen(event.sampled_point), event.blocked ? rgba(160, 90, 90, 150) : rgba(255, 235, 120, 180), 1.0f);
                 }
                 if (m_show_debug_labels) {
@@ -1203,7 +1437,7 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::ShadowRay:
-                if (ray_is_visible(event)) {
+                if (regular_ray_is_visible(event)) {
                     draw_list->AddLine(world_to_screen(event.ray_origin), world_to_screen(event.ray_end), event.blocked ? rgba(255, 80, 80) : rgba(120, 255, 150), 1.5f);
                 }
                 break;
@@ -1232,6 +1466,48 @@ void App::draw_debug_events() {
 
             case DebugEventType::Miss:
             case DebugEventType::Terminated:
+                break;
+        }
+    }
+
+    // Light-hit path overlay. This is independent from regular Rays and ignores
+    // Ray display max depth so the path is visible all the way to the light hit.
+    if (!m_show_hit_rays_only || hit_path_ids.empty()) {
+        return;
+    }
+
+    for (const DebugEvent& event : m_debug_recorder.events()) {
+        if (!contains_path_id(hit_path_ids, event.path_id)) {
+            continue;
+        }
+
+        switch (event.type) {
+            case DebugEventType::RaySegment:
+                draw_arrow(draw_list, world_to_screen(event.ray_origin), world_to_screen(event.ray_end), rgba(255, 245, 80), 4.0f);
+                break;
+
+            case DebugEventType::BsdfSample: {
+                const float len = event.depth < 0 ? 0.85f : 0.62f;
+                draw_arrow(draw_list, world_to_screen(event.hit_point), world_to_screen(event.hit_point + event.sampled_dir * len), rgba(255, 255, 120), 2.6f);
+                if (m_show_debug_labels) {
+                    char label[96];
+                    std::snprintf(label, sizeof(label), event.depth < 0 ? "hit initial pdf %.3f" : "hit pdf %.3f", event.pdf);
+                    draw_list->AddText(world_to_screen(event.hit_point + event.sampled_dir * (len + 0.12f)), rgba(255, 255, 150), label);
+                }
+                break;
+            }
+
+            case DebugEventType::HitLight:
+                draw_list->AddCircleFilled(world_to_screen(event.hit_point), 8.5f, rgba(255, 255, 90));
+                draw_list->AddCircle(world_to_screen(event.hit_point), 11.0f, rgba(255, 190, 40), 24, 2.5f);
+                if (m_show_debug_labels) {
+                    char label[128];
+                    std::snprintf(label, sizeof(label), "light-hit path\nL_P=%.4f", luminance(event.l_path));
+                    draw_list->AddText(world_to_screen(event.hit_point + event.normal * 0.42f), rgba(255, 255, 150), label);
+                }
+                break;
+
+            default:
                 break;
         }
     }
@@ -1477,6 +1753,35 @@ void App::save_scene() {
     m_scene_status = ok ? ("Saved scene: " + m_scene_json_path) : ("Failed to save scene: " + error);
 }
 
+void App::launch_production_render_gui() {
+    SceneDocumentSettings doc;
+    doc.integrator = m_settings;
+    doc.field_width = m_field_width;
+    doc.field_height = m_field_height;
+    doc.field_bounds_min = m_field_bounds.min;
+    doc.field_bounds_max = m_field_bounds.max;
+    doc.samples_per_frame = m_samples_per_frame;
+    doc.stop_after_samples = m_stop_after_samples;
+
+    std::string error;
+    const std::filesystem::path scene_path = make_unique_production_scene_path(&error);
+    if (scene_path.empty()) {
+        m_scene_status = error.empty() ? "Failed to create production job path" : error;
+        return;
+    }
+
+    if (!save_scene_json(scene_path.string(), m_scene, doc, &error)) {
+        m_scene_status = error.empty() ? "Failed to save production scene" : error;
+        return;
+    }
+
+    if (launch_self_production(scene_path, &error)) {
+        m_scene_status = "Launched Production Render GUI with " + scene_path.string();
+    } else {
+        m_scene_status = "Saved " + scene_path.string() + ", but failed to launch production mode: " + error;
+    }
+}
+
 void App::load_scene() {
     Scene next_scene;
     SceneDocumentSettings document_settings;
@@ -1524,12 +1829,10 @@ void App::reset_accumulation() {
     }
     m_debug_recorder.clear();
 
-    // When auto-stop has paused rendering at the target sample count, any scene
-    // edit or render-setting reset must start a fresh accumulation run.
-    // Keep manual pause behavior unchanged when auto-stop is disabled.
-    if (m_stop_after_samples > 0) {
-        m_render_paused = false;
-    }
+    // Auto-Comp controls whether edits/settings resets immediately restart
+    // computation. When it is off, reset the state but stay paused so UI edits
+    // remain responsive. Manual Resume can still be used to compute.
+    m_render_paused = !m_auto_compute;
 }
 
 ImVec2 App::world_to_screen(Vec2 p) const {
