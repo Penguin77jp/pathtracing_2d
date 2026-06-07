@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(pathtracing_2d LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -37,7 +37,7 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
-)
+ )
 target_include_directories(imgui PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
@@ -51,7 +51,8 @@ add_executable(pathtracing_2d
     src/pt2d/Scene.cpp
     src/pt2d/PngWriter.cpp
     src/pt2d/SceneSerializer.cpp
-)
+    src/pt2d/RISDirection.cpp
+ )
 
 target_include_directories(pathtracing_2d PRIVATE src)
 target_link_libraries(pathtracing_2d PRIVATE imgui glfw OpenGL::GL)

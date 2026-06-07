@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+#include <numbers>
 
 namespace pt2d {
 
@@ -46,6 +48,148 @@ float schlick_fresnel(float cos_i, float eta_i, float eta_t) {
     return r0 + (1.0f - r0) * m * m * m * m * m;
 }
 
+float clamp_light_angle(float degrees) {
+    return std::max(0.0f, std::min(360.0f, degrees));
+}
+
+bool emission_direction_allowed(Vec2 light_normal, Vec2 outgoing_from_light, float angle_deg) {
+    const float angle = clamp_light_angle(angle_deg);
+    if (angle >= 359.999f) {
+        return true;
+    }
+    if (angle <= 0.0f) {
+        return dot(normalize(light_normal), normalize(outgoing_from_light)) >= 0.999999f;
+    }
+    const float half_angle = 0.5f * angle * kPi / 180.0f;
+    const float cutoff = std::cos(half_angle);
+    return dot(normalize(light_normal), normalize(outgoing_from_light)) >= cutoff;
+}
+
+float light_geometry_cosine(Vec2 light_normal, Vec2 outgoing_from_light, float angle_deg) {
+    if (!emission_direction_allowed(light_normal, outgoing_from_light, angle_deg)) {
+        return 0.0f;
+    }
+
+    const float d = dot(normalize(light_normal), normalize(outgoing_from_light));
+    // 0..180 deg behaves like the original one-sided segment light. Above 180 deg,
+    // treat the light as progressively two-sided so 360 deg is meaningful.
+    return clamp_light_angle(angle_deg) <= 180.0f ? std::max(0.0f, d) : std::abs(d);
+}
+
+
+Vec2 rotate(Vec2 v, float radians) {
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    return {v.x * c - v.y * s, v.x * s + v.y * c};
+}
+
+DirectionSample sample_light_emission_direction(Vec2 light_normal, float angle_deg, Sampler& sampler) {
+    const float angle = clamp_light_angle(angle_deg);
+    if (angle >= 359.999f) {
+        return sample_uniform_circle_2d(sampler);
+    }
+
+    const float angle_rad = std::max(1.0e-4f, angle * kPi / 180.0f);
+    const float half = 0.5f * angle_rad;
+    const float offset = (sampler.next1D() * 2.0f - 1.0f) * half;
+    return {normalize(rotate(normalize(light_normal), offset)), 1.0f / angle_rad};
+}
+
+Color estimate_photon_final_gather(
+    const PhotonMap& photon_map,
+    const HitInfo& hit,
+    const Material& material,
+    Vec2 shading_normal,
+    const PhotonMappingSettings& settings)
+{
+    const float radius = std::max(1.0e-4f, settings.gather_radius);
+    const float radius2 = radius * radius;
+    const float inv_support_length = 1.0f / std::max(1.0e-4f, 2.0f * radius);
+    const Color diffuse_brdf = material.albedo * 0.5f;
+
+    Color sum = make_color(0.0f);
+    for (const Photon& photon : photon_map.photons) {
+        if (settings.caustics_only && !photon.caustic) {
+            continue;
+        }
+        const Vec2 delta = photon.position - hit.position;
+        const float d2 = length_squared(delta);
+        if (d2 > radius2) {
+            continue;
+        }
+
+        // A small cone kernel keeps the first implementation stable and easy to debug.
+        const float kernel = std::max(0.0f, 1.0f - std::sqrt(d2) / radius);
+        const Vec2 wi = normalize(-photon.incoming_dir);
+        const float cos_surface = std::max(0.0f, dot(shading_normal, wi));
+        if (cos_surface <= 0.0f) {
+            continue;
+        }
+        sum += photon.flux * diffuse_brdf * (cos_surface * kernel * inv_support_length);
+    }
+
+    return sum * settings.strength;
+}
+
+void trace_one_photon(
+    const Scene& scene,
+    Ray2 ray,
+    Color flux,
+    Sampler& sampler,
+    const IntegratorSettings& settings,
+    PhotonMap& photon_map)
+{
+    bool touched_specular = false;
+
+    for (int depth = 0; depth < std::max(1, settings.photon_mapping.photon_max_depth); ++depth) {
+        const HitInfo hit = scene.intersect(ray);
+        if (!hit.hit) {
+            return;
+        }
+
+        const Material& material = scene.materials[hit.material_id];
+        if (material.is_light()) {
+            return;
+        }
+
+        if (material.is_dielectric()) {
+            const bool front_face = dot(ray.dir, hit.normal) < 0.0f;
+            const Vec2 n = front_face ? hit.normal : -hit.normal;
+            const float eta_i = front_face ? 1.0f : material.ior;
+            const float eta_t = front_face ? material.ior : 1.0f;
+            const float eta = eta_i / eta_t;
+            const float cos_i = std::min(1.0f, std::max(0.0f, dot(-ray.dir, n)));
+
+            Vec2 refracted_dir;
+            const bool can_refract = refract(ray.dir, n, eta, refracted_dir);
+            const float fresnel = can_refract ? schlick_fresnel(cos_i, eta_i, eta_t) : 1.0f;
+            const bool choose_reflect = sampler.next1D() < fresnel;
+            const Vec2 next_dir = choose_reflect ? reflect(ray.dir, n) : refracted_dir;
+
+            flux *= material.albedo;
+            touched_specular = true;
+            ray = {hit.position + next_dir * kEpsilon, next_dir};
+            continue;
+        }
+
+        const bool store = !settings.photon_mapping.caustics_only || touched_specular;
+        if (store) {
+            Photon photon;
+            photon.position = hit.position;
+            photon.incoming_dir = ray.dir;
+            photon.normal = hit.normal;
+            photon.flux = flux;
+            photon.caustic = touched_specular;
+            photon.bounce_count = depth;
+            photon_map.photons.push_back(photon);
+        }
+
+        // This first photon mapper is caustic final gathering: store the first diffuse hit
+        // reached by the light path and stop there.
+        return;
+    }
+}
+
 Color estimate_direct_nee(
     const Scene& scene,
     const HitInfo& hit,
@@ -81,7 +225,7 @@ Color estimate_direct_nee(
 
     const Vec2 wi = to_light / dist;
     const float cos_surface = std::max(0.0f, dot(shading_normal, wi));
-    const float cos_light = std::max(0.0f, dot(light.normal, -wi));
+    const float cos_light = light_geometry_cosine(light.normal, -wi, light.emission_angle_deg);
 
     bool blocked = true;
     float g_nee = 0.0f;
@@ -152,7 +296,8 @@ Color trace_recursive(
     const IntegratorSettings& settings,
     DebugRecorder* debug,
     int depth,
-    Color beta)
+    Color beta,
+    const PhotonMap* photon_map)
 {
     if (depth >= std::max(1, settings.max_depth)) {
         if (debug) {
@@ -209,7 +354,8 @@ Color trace_recursive(
 
     if (material.is_light()) {
         const bool count_emission = (settings.kind != IntegratorKind::PathTracingNEE) || (depth == 0);
-        const Color emitted = count_emission ? material.emission : make_color(0.0f);
+        const bool direction_allowed = emission_direction_allowed(hit.normal, -ray.dir, material.emission_angle_deg);
+        const Color emitted = (count_emission && direction_allowed) ? material.emission : make_color(0.0f);
         if (debug) {
             DebugEvent event;
             event.type = DebugEventType::HitLight;
@@ -259,7 +405,7 @@ Color trace_recursive(
         }
 
         const Ray2 next_ray{hit.position + next_dir * kEpsilon, next_dir};
-        const Color next_radiance = trace_recursive(scene, next_ray, sampler, settings, debug, depth + 1, next_beta);
+        const Color next_radiance = trace_recursive(scene, next_ray, sampler, settings, debug, depth + 1, next_beta, photon_map);
         const Color local_path = material.albedo * next_radiance;
         if (debug) {
             DebugEvent event;
@@ -279,8 +425,13 @@ Color trace_recursive(
     }
 
     Color local_nee = make_color(0.0f);
-    if (settings.kind == IntegratorKind::PathTracingNEE) {
+    if (settings.kind == IntegratorKind::PathTracingNEE || settings.kind == IntegratorKind::PhotonMapping) {
         local_nee = estimate_direct_nee(scene, hit, material, shading_normal, beta, sampler, debug, depth);
+    }
+
+    Color local_photon = make_color(0.0f);
+    if (settings.kind == IntegratorKind::PhotonMapping && photon_map) {
+        local_photon = estimate_photon_final_gather(*photon_map, hit, material, shading_normal, settings.photon_mapping);
     }
 
     Color local_indirect = make_color(0.0f);
@@ -306,12 +457,12 @@ Color trace_recursive(
             }
 
             const Ray2 next_ray{hit.position + shading_normal * kEpsilon, bsdf.dir};
-            const Color next_radiance = trace_recursive(scene, next_ray, sampler, settings, debug, depth + 1, next_beta);
+            const Color next_radiance = trace_recursive(scene, next_ray, sampler, settings, debug, depth + 1, next_beta, photon_map);
             local_indirect = bsdf_weight * next_radiance;
         }
     }
 
-    const Color local_total = local_nee + local_indirect;
+    const Color local_total = local_nee + local_photon + local_indirect;
 
     if (debug) {
         DebugEvent event;
@@ -333,25 +484,88 @@ Color trace_recursive(
 
 } // namespace
 
-Color trace(const Scene& scene, Ray2 ray, Sampler& sampler, const IntegratorSettings& settings, DebugRecorder* debug) {
-    return trace_recursive(scene, ray, sampler, settings, debug, 0, make_color(1.0f));
-}
-
-Color estimate_at(const Scene& scene, Vec2 position, Sampler& sampler, const IntegratorSettings& settings, DebugRecorder* debug) {
-    const DirectionSample direction = sample_uniform_circle_2d(sampler);
-
-    if (debug) {
-        DebugEvent event;
-        event.type = DebugEventType::BsdfSample;
-        event.depth = -1;
-        event.hit_point = position;
-        event.sampled_dir = direction.dir;
-        event.pdf = direction.pdf;
-        event.beta = make_color(1.0f);
-        debug->add(event);
+PhotonMap build_photon_map(const Scene& scene, const IntegratorSettings& settings, uint64_t seed) {
+    PhotonMap photon_map;
+    const int photon_count = std::max(0, settings.photon_mapping.photon_count);
+    if (photon_count <= 0 || scene.light_segment_ids.empty()) {
+        return photon_map;
     }
 
-    return trace(scene, {position, direction.dir}, sampler, settings, debug);
+    photon_map.photons.reserve(static_cast<size_t>(photon_count));
+    for (int i = 0; i < photon_count; ++i) {
+        Sampler sampler(hash_combine(seed, static_cast<uint64_t>(i)));
+        const LightSample light = scene.sample_light(sampler.next1D(), sampler.next1D());
+        if (light.pdf_length <= 0.0f || is_black(light.emission)) {
+            continue;
+        }
+
+        const DirectionSample direction = sample_light_emission_direction(light.normal, light.emission_angle_deg, sampler);
+        if (direction.pdf <= 0.0f) {
+            continue;
+        }
+
+        const float cos_light = light_geometry_cosine(light.normal, direction.dir, light.emission_angle_deg);
+        if (cos_light <= 0.0f) {
+            continue;
+        }
+
+        const float inv_pdf = 1.0f / std::max(1.0e-8f, light.pdf_length * direction.pdf);
+        const Color flux = light.emission * (cos_light * inv_pdf / static_cast<float>(photon_count));
+        trace_one_photon(scene, {light.position + direction.dir * kEpsilon, direction.dir}, flux, sampler, settings, photon_map);
+    }
+
+    return photon_map;
+}
+
+Color trace(const Scene& scene, Ray2 ray, Sampler& sampler, const IntegratorSettings& settings, DebugRecorder* debug, const PhotonMap* photon_map) {
+    return trace_recursive(scene, ray, sampler, settings, debug, 0, make_color(1.0f), photon_map);
+}
+
+Color estimate_at(const Scene& scene, Vec2 position, Sampler& sampler, const IntegratorSettings& settings, DebugRecorder* debug, const PhotonMap* photon_map, RISDirection* ris_direction) {
+    if (settings.kind != IntegratorKind::RISDirection) {
+        DirectionSample direction = sample_uniform_circle_2d(sampler);
+
+        if (debug) {
+            DebugEvent event;
+            event.type = DebugEventType::BsdfSample;
+            event.depth = -1;
+            event.hit_point = position;
+            event.sampled_dir = direction.dir;
+            event.pdf = direction.pdf;
+            event.beta = make_color(1.0f);
+            debug->add(event);
+        }
+
+        Color radiance = trace(scene, { position, direction.dir }, sampler, settings, debug, photon_map);
+     
+        return radiance;
+    }
+
+    { // mode : RIS Direction
+        if (ris_direction == nullptr) {
+			std::cout << "RISDirection is not initialized. Returning black." << std::endl;
+            return make_color(0.0f);
+		}
+		const auto& _stg = settings.ris_direction;
+        std::vector<RISDirection::AngularSample> angular_samples(_stg.candidate_count);
+		std::vector<Color> weighed_contributions(_stg.candidate_count);
+
+        for (int i = 0; i < _stg.candidate_count; ++i) {
+            angular_samples[i] = ris_direction->sample();
+            const float pdf = std::max(angular_samples[i].pdf, 1.0e-8f);
+			const Vec2 dir{ std::cos(angular_samples[i].theta), std::sin(angular_samples[i].theta) };
+            weighed_contributions[i] = trace(scene, { position, dir }, sampler, settings, debug, photon_map) / pdf;
+		}
+        // TODO : ris update
+		ris_direction->update(angular_samples, weighed_contributions);
+        
+		Color radiance = make_color(0.0f);
+        for (int i = 0; i < _stg.candidate_count; ++i) {
+			radiance += weighed_contributions[i] / (2.0f * std::numbers::pi_v<float>) * (1.0f / static_cast<float>(_stg.candidate_count));
+        }
+
+        return radiance;
+    } // end of RIS Direction
 }
 
 } // namespace pt2d

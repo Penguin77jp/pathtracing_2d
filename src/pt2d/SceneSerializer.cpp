@@ -8,6 +8,7 @@
 #include <map>
 #include <sstream>
 #include <utility>
+#include <filesystem>
 
 namespace pt2d {
 namespace {
@@ -31,7 +32,8 @@ const char* integrator_kind_to_string(IntegratorKind kind) {
     switch (kind) {
         case IntegratorKind::PathTracing: return "path_tracing";
         case IntegratorKind::PathTracingNEE: return "path_tracing_nee";
-        case IntegratorKind::BidirectionalPT: return "bidirectional_pt";
+        case IntegratorKind::PhotonMapping: return "photon_mapping";
+        case IntegratorKind::RISDirection: return "ris_direction";
     }
     return "path_tracing";
 }
@@ -40,8 +42,11 @@ IntegratorKind integrator_kind_from_string(const std::string& s) {
     if (s == "path_tracing_nee" || s == "PathTracingNEE") {
         return IntegratorKind::PathTracingNEE;
     }
-    if (s == "bidirectional_pt" || s == "BidirectionalPT") {
-        return IntegratorKind::BidirectionalPT;
+    if (s == "photon_mapping" || s == "PhotonMapping") {
+        return IntegratorKind::PhotonMapping;
+    }
+    if (s == "ris_direction" || s == "RISDirection") {
+        return IntegratorKind::RISDirection;
     }
     return IntegratorKind::PathTracing;
 }
@@ -333,6 +338,13 @@ bool read_string(const JsonValue& object, const std::string& key, std::string& o
     return true;
 }
 
+bool read_bool(const JsonValue& object, const std::string& key, bool& out) {
+    const JsonValue* v = object.get(key);
+    if (!v || v->type != JsonValue::Type::Bool) return false;
+    out = v->bool_value;
+    return true;
+}
+
 bool read_vec2(const JsonValue& object, const std::string& key, Vec2& out) {
     const JsonValue* v = object.get(key);
     if (!v || v->type != JsonValue::Type::Array || v->array_value.size() != 2) return false;
@@ -370,6 +382,11 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
     out << "    \"integrator\": \"" << integrator_kind_to_string(settings.integrator.kind) << "\",\n";
     out << "    \"max_depth\": " << settings.integrator.max_depth << ",\n";
     out << "    \"seed\": " << settings.integrator.seed << ",\n";
+    out << "    \"photon_count\": " << settings.integrator.photon_mapping.photon_count << ",\n";
+    out << "    \"photon_max_depth\": " << settings.integrator.photon_mapping.photon_max_depth << ",\n";
+    out << "    \"photon_gather_radius\": " << settings.integrator.photon_mapping.gather_radius << ",\n";
+    out << "    \"photon_strength\": " << settings.integrator.photon_mapping.strength << ",\n";
+    out << "    \"photon_caustics_only\": " << (settings.integrator.photon_mapping.caustics_only ? "true" : "false") << ",\n";
     out << "    \"field_width\": " << settings.field_width << ",\n";
     out << "    \"field_height\": " << settings.field_height << ",\n";
     out << "    \"field_bounds_min\": "; write_vec2(out, settings.field_bounds_min); out << ",\n";
@@ -386,7 +403,8 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
         out << "      \"kind\": \"" << material_kind_to_string(m.kind) << "\",\n";
         out << "      \"albedo\": "; write_color(out, m.albedo); out << ",\n";
         out << "      \"emission\": "; write_color(out, m.emission); out << ",\n";
-        out << "      \"ior\": " << m.ior << "\n";
+        out << "      \"ior\": " << m.ior << ",\n";
+        out << "      \"emission_angle_deg\": " << m.emission_angle_deg << "\n";
         out << "    }" << (i + 1 == scene.materials.size() ? "\n" : ",\n");
     }
     out << "  ],\n";
@@ -424,9 +442,11 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
 }
 
 bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSettings& settings, std::string* error_message) {
-    std::ifstream in(path);
+    std::filesystem::path fpath = path;
+    std::filesystem::path abs_path = std::filesystem::absolute(fpath);
+    std::ifstream in(fpath);
     if (!in) {
-        if (error_message) *error_message = "Could not open file for reading: " + path;
+        if (error_message) *error_message = "Could not open file for reading: " + abs_path.string();
         return false;
     }
 
@@ -459,6 +479,11 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
         }
         read_number(*renderer, "max_depth", next_settings.integrator.max_depth);
         read_number(*renderer, "seed", next_settings.integrator.seed);
+        read_number(*renderer, "photon_count", next_settings.integrator.photon_mapping.photon_count);
+        read_number(*renderer, "photon_max_depth", next_settings.integrator.photon_mapping.photon_max_depth);
+        read_number(*renderer, "photon_gather_radius", next_settings.integrator.photon_mapping.gather_radius);
+        read_number(*renderer, "photon_strength", next_settings.integrator.photon_mapping.strength);
+        read_bool(*renderer, "photon_caustics_only", next_settings.integrator.photon_mapping.caustics_only);
         read_number(*renderer, "field_width", next_settings.field_width);
         read_number(*renderer, "field_height", next_settings.field_height);
         read_vec2(*renderer, "field_bounds_min", next_settings.field_bounds_min);
@@ -489,7 +514,9 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
         read_color(value, "albedo", m.albedo);
         read_color(value, "emission", m.emission);
         read_number(value, "ior", m.ior);
+        read_number(value, "emission_angle_deg", m.emission_angle_deg);
         if (m.ior < 1.0f) m.ior = 1.0f;
+        m.emission_angle_deg = std::max(0.0f, std::min(360.0f, m.emission_angle_deg));
         next_scene.add_material(m);
     }
     if (next_scene.materials.empty()) {
@@ -529,8 +556,12 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
 
     next_settings.integrator.max_depth = std::max(1, next_settings.integrator.max_depth);
     next_settings.integrator.seed = std::max<std::uint64_t>(1, next_settings.integrator.seed);
-    next_settings.field_width = std::max(16, next_settings.field_width);
-    next_settings.field_height = std::max(16, next_settings.field_height);
+    next_settings.integrator.photon_mapping.photon_count = std::max(0, next_settings.integrator.photon_mapping.photon_count);
+    next_settings.integrator.photon_mapping.photon_max_depth = std::max(1, next_settings.integrator.photon_mapping.photon_max_depth);
+    next_settings.integrator.photon_mapping.gather_radius = std::max(0.001f, next_settings.integrator.photon_mapping.gather_radius);
+    next_settings.integrator.photon_mapping.strength = std::max(0.0f, next_settings.integrator.photon_mapping.strength);
+    next_settings.field_width = std::max(1, next_settings.field_width);
+    next_settings.field_height = std::max(1, next_settings.field_height);
     next_settings.samples_per_frame = std::max(1, next_settings.samples_per_frame);
     next_settings.stop_after_samples = std::max(0, next_settings.stop_after_samples);
 

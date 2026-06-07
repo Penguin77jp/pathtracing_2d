@@ -1,0 +1,12 @@
+{
+  "version": "0.2.1",
+  "configurations": [
+    {
+      "type": "default",
+      "project": "CMakeLists.txt",
+      "projectTarget": "pathtracing_2d.exe",
+      "name": "pathtracing_2d.exe",
+      "currentDir": "${workspaceRoot}"
+    }
+  ]
+}

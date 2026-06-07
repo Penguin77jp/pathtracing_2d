@@ -10,6 +10,7 @@
 #include "pt2d/DebugTrace.h"
 #include "pt2d/Integrator.h"
 #include "pt2d/Scene.h"
+#include "pt2d/RISDirection.h"
 
 namespace pt2d {
 
@@ -36,22 +37,26 @@ public:
     uint64_t seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const;
     bool world_to_pixel(Vec2 p, int& x, int& y) const;
 
-    unsigned int texture_id() const { return texture_id_; }
-    int width() const { return width_; }
-    int height() const { return height_; }
-    int samples() const { return samples_; }
-    FieldBounds bounds() const { return bounds_; }
+    unsigned int texture_id() const { return m_texture_id; }
+    int width() const { return m_width; }
+    int height() const { return m_height; }
+    int samples() const { return m_samples; }
+    int last_photon_count() const { return m_last_photon_count; }
+    FieldBounds bounds() const { return m_bounds; }
 
 private:
     void update_rgba_buffer();
 
-    int width_ = 320;
-    int height_ = 224;
-    int samples_ = 0;
-    unsigned int texture_id_ = 0;
-    FieldBounds bounds_;
-    std::vector<Color> accum_;
-    std::vector<unsigned char> rgba_;
+    int m_width = 320;
+    int m_height = 224;
+    int m_samples = 0;
+    int m_last_photon_count = 0;
+    unsigned int m_texture_id = 0;
+    FieldBounds m_bounds;
+    std::vector<Color> m_accum;
+    std::vector<unsigned char> m_rgba;
+    
+    std::vector<RISDirection> m_ris_direction;
 };
 
 class App {
@@ -86,44 +91,45 @@ private:
     int default_glass_material() const;
     void clear_selection();
 
-    GLFWwindow* window_ = nullptr;
-    Scene scene_;
-    IntegratorSettings settings_;
-    FieldAccumulator field_;
-    DebugRecorder debug_recorder_;
+    GLFWwindow* m_window = nullptr;
+    Scene m_scene;
+    IntegratorSettings m_settings;
+    FieldAccumulator m_field;
+    DebugRecorder m_debug_recorder;
 
-    bool running_ = true;
-    bool render_paused_ = false;
-    bool show_field_in_canvas_ = true;
-    bool show_debug_rays_ = true;
-    bool show_debug_hits_ = true;
-    bool show_debug_labels_ = true;
-    bool show_normals_ = true;
-    int samples_per_frame_ = 1;
-    int stop_after_samples_ = 0; // 0 = infinite
-    int field_width_ = 320;
-    int field_height_ = 224;
-    FieldBounds field_bounds_;
+    bool m_running = true;
+    bool m_render_paused = false;
+    bool m_show_field_in_canvas = true;
+    bool m_show_debug_rays = true;
+    bool m_show_debug_hits = true;
+    bool m_show_debug_labels = true;
+    bool m_show_normals = true;
+    int m_samples_per_frame = 1;
+    int m_stop_after_samples = 0; // 0 = infinite
+    int m_field_width = 320;
+    int m_field_height = 224;
+    FieldBounds m_field_bounds;
 
-    int selected_pixel_x_ = 160;
-    int selected_pixel_y_ = 112;
-    int debug_sample_index_ = 0;
-    bool debug_uses_selected_pixel_ = true;
-    Vec2 debug_world_position_ = {0.0f, 0.0f};
+    int m_selected_pixel_x = 160;
+    int m_selected_pixel_y = 112;
+    int m_debug_sample_index = 0;
+    bool m_debug_uses_selected_pixel = true;
+    Vec2 m_debug_world_position = {0.0f, 0.0f};
 
-    SelectedObjectKind selected_kind_ = SelectedObjectKind::None;
-    int selected_index_ = -1;
-    int selected_handle_ = -1; // segment: 0 A, 1 B, 2 whole. circle: 0 center, 1 radius, 2 whole
+    SelectedObjectKind m_selected_kind = SelectedObjectKind::None;
+    int m_selected_index = -1;
+    int m_selected_handle = -1; // segment: 0 A, 1 B, 2 whole. circle: 0 center, 1 radius, 2 whole
+    bool m_dragging_scene_handle = false;
 
-    Vec2 view_center_ = {0.0f, 0.0f};
-    float view_scale_ = 110.0f;
-    ImVec2 canvas_origin_ = {0.0f, 0.0f};
-    ImVec2 canvas_size_ = {1.0f, 1.0f};
+    Vec2 m_view_center = {0.0f, 0.0f};
+    float m_view_scale = 110.0f;
+    ImVec2 m_canvas_origin = {0.0f, 0.0f};
+    ImVec2 m_canvas_size = {1.0f, 1.0f};
 
-    std::string save_png_path_ = "field.png";
-    std::string scene_json_path_ = "scene.json";
-    std::string save_status_;
-    std::string scene_status_;
+    std::string m_save_png_path = "field.png";
+    std::string m_scene_json_path = "scene.json";
+    std::string m_save_status;
+    std::string m_scene_status;
 };
 
 } // namespace pt2d

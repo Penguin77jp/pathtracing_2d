@@ -206,6 +206,7 @@ LightSample Scene::sample_light(float u_select, float u_segment) const {
     sample.normal = light.normal;
     sample.emission = material.emission;
     sample.pdf_length = total > 0.0f ? 1.0f / total : 0.0f;
+    sample.emission_angle_deg = material.emission_angle_deg;
     sample.light_object_id = light.object_id;
     return sample;
 }

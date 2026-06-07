@@ -19,6 +19,7 @@ struct Material {
     Color emission = make_color(0.0f);
     MaterialKind kind = MaterialKind::Diffuse;
     float ior = 1.5f;
+    float emission_angle_deg = 180.0f; // Light emission cone angle around segment normal. 360 = two-sided/full angle.
 
     bool is_light() const { return !is_black(emission); }
     bool is_dielectric() const { return kind == MaterialKind::Dielectric; }
@@ -60,6 +61,7 @@ struct LightSample {
     Vec2 normal;
     Color emission;
     float pdf_length = 0.0f;
+    float emission_angle_deg = 180.0f;
     int light_object_id = -1;
 };
 

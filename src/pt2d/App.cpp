@@ -11,6 +11,10 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 #include "pt2d/PngWriter.h"
 #include "pt2d/SceneSerializer.h"
 
@@ -26,8 +30,28 @@ float luminance(Color c) {
     return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
 }
 
-uint64_t kind_to_seed(IntegratorKind kind) {
+uint64_t integrator_kind_seed(IntegratorKind kind) {
     return static_cast<uint64_t>(static_cast<int>(kind) + 1) * 0x9e3779b97f4a7c15ULL;
+}
+
+uint64_t sample_seed_base(const IntegratorSettings& settings) {
+    return hash_combine(settings.seed, integrator_kind_seed(settings.kind));
+}
+
+uint64_t field_sample_seed(const IntegratorSettings& settings, int x, int y, int sample_index) {
+    uint64_t seed = sample_seed_base(settings);
+    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, x)));
+    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, y)));
+    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, sample_index)));
+    return seed;
+}
+
+uint64_t world_sample_seed(const IntegratorSettings& settings, Vec2 position, int sample_index) {
+    uint64_t seed = sample_seed_base(settings);
+    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, sample_index)));
+    seed = hash_combine(seed, static_cast<uint64_t>((position.x + 1000.0f) * 1000.0f));
+    seed = hash_combine(seed, static_cast<uint64_t>((position.y + 1000.0f) * 1000.0f));
+    return seed;
 }
 
 ImU32 depth_color(int depth) {
@@ -74,16 +98,17 @@ Vec2 bounds_sample_position(FieldBounds bounds, int x, int y, int width, int hei
 } // namespace
 
 void FieldAccumulator::reset(int width, int height, FieldBounds bounds) {
-    width_ = std::max(16, width);
-    height_ = std::max(16, height);
-    bounds_ = bounds;
-    samples_ = 0;
-    accum_.assign(static_cast<size_t>(width_ * height_), make_color(0.0f));
-    rgba_.assign(static_cast<size_t>(width_ * height_ * 4), 0);
+    m_width = std::max(1, width);
+    m_height = std::max(1, height);
+    m_bounds = bounds;
+    m_samples = 0;
+    m_last_photon_count = 0;
+    m_accum.assign(static_cast<size_t>(m_width * m_height), make_color(0.0f));
+    m_rgba.assign(static_cast<size_t>(m_width * m_height * 4), 0);
 
-    if (texture_id_ == 0) {
-        glGenTextures(1, &texture_id_);
-        glBindTexture(GL_TEXTURE_2D, texture_id_);
+    if (m_texture_id == 0) {
+        glGenTextures(1, &m_texture_id);
+        glBindTexture(GL_TEXTURE_2D, m_texture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -93,16 +118,11 @@ void FieldAccumulator::reset(int width, int height, FieldBounds bounds) {
 }
 
 uint64_t FieldAccumulator::seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const {
-    uint64_t seed = settings.seed;
-    seed = hash_combine(seed, kind_to_seed(settings.kind));
-    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, x)));
-    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, y)));
-    seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, sample_index)));
-    return seed;
+    return field_sample_seed(settings, x, y, sample_index);
 }
 
 Vec2 FieldAccumulator::pixel_center_to_world(int x, int y) const {
-    return bounds_sample_position(bounds_, x, y, width_, height_, 0.5f, 0.5f);
+    return bounds_sample_position(m_bounds, x, y, m_width, m_height, 0.5f, 0.5f);
 }
 
 Vec2 FieldAccumulator::sample_position_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const {
@@ -112,74 +132,102 @@ Vec2 FieldAccumulator::sample_position_for_pixel(int x, int y, int sample_index,
 }
 
 bool FieldAccumulator::world_to_pixel(Vec2 p, int& x, int& y) const {
-    if (width_ <= 0 || height_ <= 0) {
+    if (m_width <= 0 || m_height <= 0) {
         x = 0;
         y = 0;
         return false;
     }
 
-    const float w = bounds_.max.x - bounds_.min.x;
-    const float h = bounds_.max.y - bounds_.min.y;
+    const float w = m_bounds.max.x - m_bounds.min.x;
+    const float h = m_bounds.max.y - m_bounds.min.y;
     if (w <= 0.0f || h <= 0.0f) {
         x = 0;
         y = 0;
         return false;
     }
 
-    const float u = (p.x - bounds_.min.x) / w;
-    const float v = (bounds_.max.y - p.y) / h;
+    const float u = (p.x - m_bounds.min.x) / w;
+    const float v = (m_bounds.max.y - p.y) / h;
     const bool inside = u >= 0.0f && u < 1.0f && v >= 0.0f && v < 1.0f;
 
-    x = std::clamp(static_cast<int>(u * static_cast<float>(width_)), 0, width_ - 1);
-    y = std::clamp(static_cast<int>(v * static_cast<float>(height_)), 0, height_ - 1);
+    x = std::clamp(static_cast<int>(u * static_cast<float>(m_width)), 0, m_width - 1);
+    y = std::clamp(static_cast<int>(v * static_cast<float>(m_height)), 0, m_height - 1);
     return inside;
 }
 
 void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& settings, int samples_per_frame) {
-    if (accum_.empty()) {
-        reset(width_, height_, bounds_);
+    if (m_accum.empty()) {
+        reset(m_width, m_height, m_bounds);
     }
 
     const int spp = std::max(1, samples_per_frame);
+    if (settings.kind != IntegratorKind::PhotonMapping) {
+        m_last_photon_count = 0;
+    }
+    
+    // init ris directions
+    if (settings.kind == IntegratorKind::RISDirection && settings.ris_direction.need_init) {
+        for (int y = 0; y < m_height; ++y) {
+            for (int x = 0; x < m_width; ++x) {
+                const uint64_t ris_seed = seed_for_pixel(x, y, 0, settings) ^ 0x7269736469726563ULL;
+                m_ris_direction.emplace_back(settings.ris_direction.num_bins, settings.ris_direction.min_probability_percent, settings.ris_direction.smooth_sigma_deg, ris_seed);
+            }
+        }
+	}
+
     for (int s = 0; s < spp; ++s) {
-        const int sample_index = samples_ + s;
-        for (int y = 0; y < height_; ++y) {
-            for (int x = 0; x < width_; ++x) {
+        const int sample_index = m_samples + s;
+
+        PhotonMap photon_map;
+        const PhotonMap* photon_map_ptr = nullptr;
+        if (settings.kind == IntegratorKind::PhotonMapping) {
+            const uint64_t photon_seed = hash_combine(sample_seed_base(settings), static_cast<uint64_t>(sample_index) ^ 0x70686f746f6eULL);
+            photon_map = build_photon_map(scene, settings, photon_seed);
+            m_last_photon_count = static_cast<int>(photon_map.photons.size());
+            photon_map_ptr = &photon_map;
+        }
+
+        for (int y = 0; y < m_height; ++y) {
+            for (int x = 0; x < m_width; ++x) {
                 Sampler sampler(seed_for_pixel(x, y, sample_index, settings));
                 const Vec2 position = pixel_center_to_world(x, y);
-                accum_[static_cast<size_t>(y * width_ + x)] += estimate_at(scene, position, sampler, settings, nullptr);
+				RISDirection* ris_direction_ptr = nullptr;
+                if (settings.kind == IntegratorKind::RISDirection) {
+                    ris_direction_ptr = &m_ris_direction[static_cast<size_t>(y * m_width + x)];
+                }
+                m_accum[static_cast<size_t>(y * m_width + x)] += estimate_at(scene, position, sampler, settings, nullptr, photon_map_ptr, ris_direction_ptr);
             }
         }
     }
-    samples_ += spp;
+    m_samples += spp;
 }
 
 void FieldAccumulator::update_rgba_buffer() {
-    for (int y = 0; y < height_; ++y) {
-        for (int x = 0; x < width_; ++x) {
-            Color c = accum_.empty() || samples_ == 0
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            Color c = m_accum.empty() || m_samples == 0
                 ? make_color(0.0f)
-                : accum_[static_cast<size_t>(y * width_ + x)] / static_cast<float>(samples_);
+                : m_accum[static_cast<size_t>(y * m_width + x)] / static_cast<float>(m_samples);
             c = clamp(tonemap(c));
-            const size_t i = static_cast<size_t>((y * width_ + x) * 4);
-            rgba_[i + 0] = to_srgb8(c.r);
-            rgba_[i + 1] = to_srgb8(c.g);
-            rgba_[i + 2] = to_srgb8(c.b);
-            rgba_[i + 3] = 255;
+            const size_t i = static_cast<size_t>((y * m_width + x) * 4);
+            m_rgba[i + 0] = to_srgb8(c.r);
+            m_rgba[i + 1] = to_srgb8(c.g);
+            m_rgba[i + 2] = to_srgb8(c.b);
+            m_rgba[i + 3] = 255;
         }
     }
 }
 
 void FieldAccumulator::upload_to_texture() {
-    if (texture_id_ == 0) {
-        glGenTextures(1, &texture_id_);
+    if (m_texture_id == 0) {
+        glGenTextures(1, &m_texture_id);
     }
 
     update_rgba_buffer();
 
-    glBindTexture(GL_TEXTURE_2D, texture_id_);
+    glBindTexture(GL_TEXTURE_2D, m_texture_id);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba_.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_width, m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_rgba.data());
 }
 
 bool FieldAccumulator::save_png(const std::string& path) {
@@ -187,7 +235,7 @@ bool FieldAccumulator::save_png(const std::string& path) {
         return false;
     }
     update_rgba_buffer();
-    return write_png_rgba8(path.c_str(), width_, height_, rgba_.data());
+    return write_png_rgba8(path.c_str(), m_width, m_height, m_rgba.data());
 }
 
 App::App() = default;
@@ -197,10 +245,10 @@ App::~App() {
 }
 
 bool App::init() {
-    scene_ = make_default_scene();
-    settings_.kind = IntegratorKind::PathTracing;
-    settings_.max_depth = 6;
-    settings_.seed = 1;
+    m_scene = make_default_scene();
+    m_settings.kind = IntegratorKind::PathTracing;
+    m_settings.max_depth = 6;
+    m_settings.seed = 1;
 
     if (!glfwInit()) {
         std::fprintf(stderr, "Failed to initialize GLFW\n");
@@ -219,14 +267,14 @@ bool App::init() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
 
-    window_ = glfwCreateWindow(1360, 880, "Pathtracing2D Field Debugger", nullptr, nullptr);
-    if (!window_) {
+    m_window = glfwCreateWindow(1360, 880, "Pathtracing2D Field Debugger", nullptr, nullptr);
+    if (!m_window) {
         std::fprintf(stderr, "Failed to create GLFW window\n");
         glfwTerminate();
         return false;
     }
 
-    glfwMakeContextCurrent(window_);
+    glfwMakeContextCurrent(m_window);
     glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
@@ -235,17 +283,17 @@ bool App::init() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     ImGui::StyleColorsDark();
-    ImGui_ImplGlfw_InitForOpenGL(window_, true);
+    ImGui_ImplGlfw_InitForOpenGL(m_window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    field_.reset(field_width_, field_height_, field_bounds_);
-    debug_world_position_ = field_.pixel_center_to_world(selected_pixel_x_, selected_pixel_y_);
+    m_field.reset(m_field_width, m_field_height, m_field_bounds);
+    m_debug_world_position = m_field.pixel_center_to_world(m_selected_pixel_x, m_selected_pixel_y);
     retrace_debug_sample();
     return true;
 }
 
 void App::shutdown() {
-    if (!window_) {
+    if (!m_window) {
         return;
     }
 
@@ -253,21 +301,21 @@ void App::shutdown() {
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    glfwDestroyWindow(window_);
+    glfwDestroyWindow(m_window);
     glfwTerminate();
-    window_ = nullptr;
+    m_window = nullptr;
 }
 
 void App::run() {
-    while (window_ && !glfwWindowShouldClose(window_) && running_) {
+    while (m_window && !glfwWindowShouldClose(m_window) && m_running) {
         glfwPollEvents();
 
-        if (!render_paused_) {
-            int spp = std::max(1, samples_per_frame_);
-            if (stop_after_samples_ > 0) {
-                const int remaining = stop_after_samples_ - field_.samples();
+        if (!m_render_paused) {
+            int spp = std::max(1, m_samples_per_frame);
+            if (m_stop_after_samples > 0) {
+                const int remaining = m_stop_after_samples - m_field.samples();
                 if (remaining <= 0) {
-                    render_paused_ = true;
+                    m_render_paused = true;
                     spp = 0;
                 } else {
                     spp = std::min(spp, remaining);
@@ -275,10 +323,10 @@ void App::run() {
             }
 
             if (spp > 0) {
-                field_.accumulate(scene_, settings_, spp);
-                field_.upload_to_texture();
-                if (stop_after_samples_ > 0 && field_.samples() >= stop_after_samples_) {
-                    render_paused_ = true;
+                m_field.accumulate(m_scene, m_settings, spp);
+                m_field.upload_to_texture();
+                if (m_stop_after_samples > 0 && m_field.samples() >= m_stop_after_samples) {
+                    m_render_paused = true;
                 }
             }
         }
@@ -294,13 +342,13 @@ void App::run() {
         ImGui::Render();
         int display_w = 0;
         int display_h = 0;
-        glfwGetFramebufferSize(window_, &display_w, &display_h);
+        glfwGetFramebufferSize(m_window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
         glClearColor(0.05f, 0.055f, 0.065f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        glfwSwapBuffers(window_);
+        glfwSwapBuffers(m_window);
     }
 }
 
@@ -308,8 +356,8 @@ void App::draw_main_menu() {
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Save PNG")) {
-                const bool ok = field_.save_png(save_png_path_);
-                save_status_ = ok ? ("Saved PNG: " + save_png_path_) : ("Failed to save PNG: " + save_png_path_);
+                const bool ok = m_field.save_png(m_save_png_path);
+                m_save_status = ok ? ("Saved PNG: " + m_save_png_path) : ("Failed to save PNG: " + m_save_png_path);
             }
             if (ImGui::MenuItem("Save Scene")) {
                 save_scene();
@@ -318,7 +366,7 @@ void App::draw_main_menu() {
                 load_scene();
             }
             if (ImGui::MenuItem("Exit")) {
-                running_ = false;
+                m_running = false;
             }
             ImGui::EndMenu();
         }
@@ -345,43 +393,58 @@ void App::draw_main_menu() {
 void App::draw_field_panel() {
     ImGui::Begin("2D Luminance Field");
 
-    int mode = static_cast<int>(settings_.kind);
+    int mode = static_cast<int>(m_settings.kind);
     const char* modes[] = {
         "Path tracing",
         "Path tracing + NEE",
-        "BDPT (planned)"
+        "RIS direction",
+        "Photon mapping"
     };
     if (ImGui::Combo("Integrator", &mode, modes, IM_ARRAYSIZE(modes))) {
-        settings_.kind = static_cast<IntegratorKind>(mode);
+        m_settings.kind = static_cast<IntegratorKind>(mode);
         reset_accumulation();
         retrace_debug_sample();
     }
 
     bool changed = false;
-    changed |= ImGui::SliderInt("Max depth", &settings_.max_depth, 1, 16);
-    changed |= ImGui::SliderInt("SPP / frame", &samples_per_frame_, 1, 8);
-    changed |= ImGui::InputInt("Auto stop samples (0=infinite)", &stop_after_samples_);
-    stop_after_samples_ = std::max(0, stop_after_samples_);
+    changed |= ImGui::SliderInt("Max depth", &m_settings.max_depth, 1, 16);
+    changed |= ImGui::SliderInt("SPP / frame", &m_samples_per_frame, 1, 8);
+    changed |= ImGui::InputInt("Auto stop samples (0=infinite)", &m_stop_after_samples);
+    m_stop_after_samples = std::max(0, m_stop_after_samples);
 
-    int seed_as_int = static_cast<int>(settings_.seed);
+    int seed_as_int = static_cast<int>(m_settings.seed);
     if (ImGui::InputInt("Seed", &seed_as_int)) {
-        settings_.seed = static_cast<uint64_t>(std::max(1, seed_as_int));
+        m_settings.seed = static_cast<uint64_t>(std::max(1, seed_as_int));
         changed = true;
     }
 
-    int new_width = field_width_;
-    int new_height = field_height_;
+    if (m_settings.kind == IntegratorKind::PhotonMapping) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Photon mapping");
+        changed |= ImGui::InputInt("Photon count", &m_settings.photon_mapping.photon_count);
+        m_settings.photon_mapping.photon_count = std::max(0, m_settings.photon_mapping.photon_count);
+        changed |= ImGui::SliderInt("Photon max depth", &m_settings.photon_mapping.photon_max_depth, 1, 24);
+        changed |= ImGui::DragFloat("Gather radius", &m_settings.photon_mapping.gather_radius, 0.005f, 0.005f, 2.0f, "%.3f");
+        changed |= ImGui::DragFloat("Photon strength", &m_settings.photon_mapping.strength, 0.02f, 0.0f, 10.0f, "%.2f");
+        changed |= ImGui::Checkbox("Caustics only", &m_settings.photon_mapping.caustics_only);
+        ImGui::TextWrapped("Photon mapping pass: shoot photons from segment lights, keep photons that hit diffuse surfaces after glass/specular bounces, then add nearby photons at diffuse path hits.");
+    }
+
+    int new_width = m_field_width;
+    int new_height = m_field_height;
     bool resolution_changed = false;
-    resolution_changed |= ImGui::SliderInt("Field width", &new_width, 64, 768);
-    resolution_changed |= ImGui::SliderInt("Field height", &new_height, 64, 768);
+    resolution_changed |= ImGui::InputInt("Field width", &new_width);
+    resolution_changed |= ImGui::InputInt("Field height", &new_height);
+    new_width = std::max(1, new_width);
+    new_height = std::max(1, new_height);
 
     bool bounds_changed = false;
-    bounds_changed |= ImGui::DragFloat2("Bounds min", &field_bounds_.min.x, 0.02f);
-    bounds_changed |= ImGui::DragFloat2("Bounds max", &field_bounds_.max.x, 0.02f);
+    bounds_changed |= ImGui::DragFloat2("Bounds min", &m_field_bounds.min.x, 0.02f);
+    bounds_changed |= ImGui::DragFloat2("Bounds max", &m_field_bounds.max.x, 0.02f);
 
     if (resolution_changed || bounds_changed) {
-        field_width_ = new_width;
-        field_height_ = new_height;
+        m_field_width = new_width;
+        m_field_height = new_height;
         reset_accumulation();
         retrace_debug_sample();
     } else if (changed) {
@@ -389,8 +452,8 @@ void App::draw_field_panel() {
         retrace_debug_sample();
     }
 
-    if (ImGui::Button(render_paused_ ? "Resume" : "Pause")) {
-        render_paused_ = !render_paused_;
+    if (ImGui::Button(m_render_paused ? "Resume" : "Pause")) {
+        m_render_paused = !m_render_paused;
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset accumulation")) {
@@ -402,77 +465,78 @@ void App::draw_field_panel() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Save PNG")) {
-        const bool ok = field_.save_png(save_png_path_);
-        save_status_ = ok ? ("Saved PNG: " + save_png_path_) : ("Failed to save PNG: " + save_png_path_);
+        const bool ok = m_field.save_png(m_save_png_path);
+        m_save_status = ok ? ("Saved PNG: " + m_save_png_path) : ("Failed to save PNG: " + m_save_png_path);
     }
 
     char path_buffer[512];
-    std::snprintf(path_buffer, sizeof(path_buffer), "%s", save_png_path_.c_str());
+    std::snprintf(path_buffer, sizeof(path_buffer), "%s", m_save_png_path.c_str());
     if (ImGui::InputText("PNG path", path_buffer, sizeof(path_buffer))) {
-        save_png_path_ = path_buffer;
+        m_save_png_path = path_buffer;
     }
-    if (!save_status_.empty()) {
-        ImGui::TextWrapped("%s", save_status_.c_str());
+    if (!m_save_status.empty()) {
+        ImGui::TextWrapped("%s", m_save_status.c_str());
     }
 
-    ImGui::Text("Accumulated samples: %d", field_.samples());
-    if (stop_after_samples_ > 0) {
-        ImGui::Text("Auto stop target: %d", stop_after_samples_);
+    ImGui::Text("Accumulated samples: %d", m_field.samples());
+    if (m_stop_after_samples > 0) {
+        ImGui::Text("Auto stop target: %d", m_stop_after_samples);
     } else {
         ImGui::Text("Auto stop target: infinite");
     }
     ImGui::TextWrapped("Each pixel is a deterministic world-space probe at the exact pixel center. Rendering and debug retrace use the same world position and the same seed for each (pixel, sample index), so the selected pixel is exactly reproducible.");
-    if (settings_.kind == IntegratorKind::PathTracingNEE) {
+    if (m_settings.kind == IntegratorKind::PathTracingNEE) {
         ImGui::TextWrapped("NEE debug: every diffuse hit also samples a light point. The canvas shows sampled light points, shadow segments, G_N, and per-vertex L_N / L_P.");
-    } else if (settings_.kind == IntegratorKind::BidirectionalPT) {
-        ImGui::TextWrapped("BDPT hook is reserved. Next: eye/probe path + light path + vertex connection visualization.");
+    } else if (m_settings.kind == IntegratorKind::PhotonMapping) {
+        ImGui::Text("Stored photons in last render sample: %d", m_field.last_photon_count());
+        ImGui::TextWrapped("Photon mapping debug: L_N includes direct NEE plus photon final gather. Photon hits are not drawn yet; use photon count/radius/strength to tune caustic visibility.");
     }
 
     ImGui::Separator();
 
     const float available_width = ImGui::GetContentRegionAvail().x;
-    const float aspect = static_cast<float>(field_.height()) / static_cast<float>(std::max(1, field_.width()));
+    const float aspect = static_cast<float>(m_field.height()) / static_cast<float>(std::max(1, m_field.width()));
     ImVec2 image_size{std::max(240.0f, available_width), std::max(180.0f, available_width * aspect)};
     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
     ImGui::Image(
-        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(field_.texture_id())),
+        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(m_field.texture_id())),
         image_size);
 
     if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const ImGuiIO& io = ImGui::GetIO();
         const float rel_x = std::clamp((io.MousePos.x - image_pos.x) / image_size.x, 0.0f, 0.9999f);
         const float rel_y = std::clamp((io.MousePos.y - image_pos.y) / image_size.y, 0.0f, 0.9999f);
-        selected_pixel_x_ = std::clamp(static_cast<int>(rel_x * field_.width()), 0, field_.width() - 1);
-        selected_pixel_y_ = std::clamp(static_cast<int>(rel_y * field_.height()), 0, field_.height() - 1);
-        debug_uses_selected_pixel_ = true;
+        m_selected_pixel_x = std::clamp(static_cast<int>(rel_x * m_field.width()), 0, m_field.width() - 1);
+        m_selected_pixel_y = std::clamp(static_cast<int>(rel_y * m_field.height()), 0, m_field.height() - 1);
+        m_debug_uses_selected_pixel = true;
         retrace_debug_sample();
     }
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    if (debug_uses_selected_pixel_) {
-        const float x0 = image_pos.x + image_size.x * (static_cast<float>(selected_pixel_x_) / static_cast<float>(field_.width()));
-        const float y0 = image_pos.y + image_size.y * (static_cast<float>(selected_pixel_y_) / static_cast<float>(field_.height()));
-        const float x1 = image_pos.x + image_size.x * (static_cast<float>(selected_pixel_x_ + 1) / static_cast<float>(field_.width()));
-        const float y1 = image_pos.y + image_size.y * (static_cast<float>(selected_pixel_y_ + 1) / static_cast<float>(field_.height()));
+    if (m_debug_uses_selected_pixel) {
+        const float x0 = image_pos.x + image_size.x * (static_cast<float>(m_selected_pixel_x) / static_cast<float>(m_field.width()));
+        const float y0 = image_pos.y + image_size.y * (static_cast<float>(m_selected_pixel_y) / static_cast<float>(m_field.height()));
+        const float x1 = image_pos.x + image_size.x * (static_cast<float>(m_selected_pixel_x + 1) / static_cast<float>(m_field.width()));
+        const float y1 = image_pos.y + image_size.y * (static_cast<float>(m_selected_pixel_y + 1) / static_cast<float>(m_field.height()));
         draw_list->AddRect(ImVec2{x0, y0}, ImVec2{x1, y1}, rgba(255, 130, 80), 0.0f, 0, 2.0f);
     }
 
     ImGui::Separator();
-    ImGui::Text("Selected pixel: (%d, %d)", selected_pixel_x_, selected_pixel_y_);
-    ImGui::Text("Debug position: %.3f, %.3f", debug_world_position_.x, debug_world_position_.y);
+    ImGui::Text("Selected pixel: (%d, %d)", m_selected_pixel_x, m_selected_pixel_y);
+    ImGui::Text("Debug position: %.3f, %.3f", m_debug_world_position.x, m_debug_world_position.y);
 
-    const int max_sample = std::max(0, field_.samples() - 1);
-    debug_sample_index_ = std::clamp(debug_sample_index_, 0, max_sample);
-    if (ImGui::SliderInt("Debug sample index", &debug_sample_index_, 0, std::max(0, max_sample))) {
+    const int max_sample = std::max(0, m_field.samples() - 1);
+    m_debug_sample_index = std::clamp(m_debug_sample_index, 0, max_sample);
+    if (ImGui::SliderInt("Debug sample index", &m_debug_sample_index, 0, std::max(0, max_sample))) {
         retrace_debug_sample();
     }
     if (ImGui::Button("Previous sample")) {
-        debug_sample_index_ = std::max(0, debug_sample_index_ - 1);
+        m_debug_sample_index = std::max(0, m_debug_sample_index - 1);
         retrace_debug_sample();
     }
     ImGui::SameLine();
     if (ImGui::Button("Next sample")) {
-        debug_sample_index_ += 1;
+        m_debug_sample_index += 1;
         retrace_debug_sample();
     }
 
@@ -485,15 +549,15 @@ void App::draw_scene_panel() {
     draw_scene_controls();
     ImGui::Separator();
 
-    ImGui::Checkbox("Field overlay", &show_field_in_canvas_);
+    ImGui::Checkbox("Field overlay", &m_show_field_in_canvas);
     ImGui::SameLine();
-    ImGui::Checkbox("Rays", &show_debug_rays_);
+    ImGui::Checkbox("Rays", &m_show_debug_rays);
     ImGui::SameLine();
-    ImGui::Checkbox("Hits", &show_debug_hits_);
+    ImGui::Checkbox("Hits", &m_show_debug_hits);
     ImGui::SameLine();
-    ImGui::Checkbox("Normals", &show_normals_);
+    ImGui::Checkbox("Normals", &m_show_normals);
     ImGui::SameLine();
-    ImGui::Checkbox("Labels", &show_debug_labels_);
+    ImGui::Checkbox("Labels", &m_show_debug_labels);
 
     ImGui::TextWrapped("Image click: select a field pixel. Canvas click near an object: select/edit it. Canvas click empty space: debug exact world position. Drag selected handles to modify geometry. Right drag pans, mouse wheel zooms.");
     draw_canvas();
@@ -503,20 +567,20 @@ void App::draw_scene_panel() {
 
 void App::draw_scene_controls() {
     if (ImGui::Button("Default scene")) {
-        scene_ = make_default_scene();
+        m_scene = make_default_scene();
         clear_selection();
         mark_scene_edited();
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset view")) {
-        view_center_ = {0.0f, 0.0f};
-        view_scale_ = 110.0f;
+        m_view_center = {0.0f, 0.0f};
+        m_view_scale = 110.0f;
     }
 
     char scene_path_buffer[512];
-    std::snprintf(scene_path_buffer, sizeof(scene_path_buffer), "%s", scene_json_path_.c_str());
+    std::snprintf(scene_path_buffer, sizeof(scene_path_buffer), "%s", m_scene_json_path.c_str());
     if (ImGui::InputText("Scene JSON path", scene_path_buffer, sizeof(scene_path_buffer))) {
-        scene_json_path_ = scene_path_buffer;
+        m_scene_json_path = scene_path_buffer;
     }
     if (ImGui::Button("Save scene")) {
         save_scene();
@@ -525,46 +589,46 @@ void App::draw_scene_controls() {
     if (ImGui::Button("Load scene")) {
         load_scene();
     }
-    if (!scene_status_.empty()) {
-        ImGui::TextWrapped("%s", scene_status_.c_str());
+    if (!m_scene_status.empty()) {
+        ImGui::TextWrapped("%s", m_scene_status.c_str());
     }
 
     if (ImGui::Button("Add wall")) {
         const int mat = default_wall_material();
-        const Vec2 a = view_center_ + Vec2{-0.7f, -0.25f};
-        const Vec2 b = view_center_ + Vec2{ 0.7f,  0.25f};
+        const Vec2 a = m_view_center + Vec2{-0.7f, -0.25f};
+        const Vec2 b = m_view_center + Vec2{ 0.7f,  0.25f};
         const Vec2 n = normalize(perpendicular(b - a));
-        selected_kind_ = SelectedObjectKind::Segment;
-        selected_index_ = scene_.add_segment(a, b, n, mat);
-        selected_handle_ = -1;
+        m_selected_kind = SelectedObjectKind::Segment;
+        m_selected_index = m_scene.add_segment(a, b, n, mat);
+        m_selected_handle = -1;
         mark_scene_edited();
     }
     ImGui::SameLine();
     if (ImGui::Button("Add light")) {
         const int mat = default_light_material();
-        const Vec2 a = view_center_ + Vec2{-0.55f, 0.65f};
-        const Vec2 b = view_center_ + Vec2{ 0.55f, 0.65f};
-        selected_kind_ = SelectedObjectKind::Segment;
-        selected_index_ = scene_.add_segment(a, b, {0.0f, -1.0f}, mat);
-        selected_handle_ = -1;
+        const Vec2 a = m_view_center + Vec2{-0.55f, 0.65f};
+        const Vec2 b = m_view_center + Vec2{ 0.55f, 0.65f};
+        m_selected_kind = SelectedObjectKind::Segment;
+        m_selected_index = m_scene.add_segment(a, b, {0.0f, -1.0f}, mat);
+        m_selected_handle = -1;
         mark_scene_edited();
     }
     ImGui::SameLine();
     if (ImGui::Button("Add glass circle")) {
         const int mat = default_glass_material();
-        selected_kind_ = SelectedObjectKind::Circle;
-        selected_index_ = scene_.add_circle(view_center_, 0.45f, mat);
-        selected_handle_ = -1;
+        m_selected_kind = SelectedObjectKind::Circle;
+        m_selected_index = m_scene.add_circle(m_view_center, 0.45f, mat);
+        m_selected_handle = -1;
         mark_scene_edited();
     }
 
-    if (selected_kind_ == SelectedObjectKind::Segment && selected_index_ >= 0 && selected_index_ < static_cast<int>(scene_.segments.size())) {
-        Segment& segment = scene_.segments[selected_index_];
+    if (m_selected_kind == SelectedObjectKind::Segment && m_selected_index >= 0 && m_selected_index < static_cast<int>(m_scene.segments.size())) {
+        Segment& segment = m_scene.segments[m_selected_index];
         ImGui::Separator();
-        ImGui::Text("Selected segment: %d", selected_index_);
+        ImGui::Text("Selected segment: %d", m_selected_index);
 
         if (ImGui::Button("Delete selected")) {
-            scene_.erase_segment(selected_index_);
+            m_scene.erase_segment(m_selected_index);
             clear_selection();
             mark_scene_edited();
             return;
@@ -579,7 +643,7 @@ void App::draw_scene_controls() {
             Segment copy = segment;
             copy.a += Vec2{0.15f, 0.15f};
             copy.b += Vec2{0.15f, 0.15f};
-            selected_index_ = scene_.add_segment(copy.a, copy.b, copy.normal, copy.material_id);
+            m_selected_index = m_scene.add_segment(copy.a, copy.b, copy.normal, copy.material_id);
             mark_scene_edited();
             return;
         }
@@ -589,10 +653,10 @@ void App::draw_scene_controls() {
         edited |= ImGui::DragFloat2("B", &segment.b.x, 0.02f);
 
         int material_id = segment.material_id;
-        if (ImGui::BeginCombo("Material", scene_.materials[material_id].name.c_str())) {
-            for (int i = 0; i < static_cast<int>(scene_.materials.size()); ++i) {
+        if (ImGui::BeginCombo("Material", m_scene.materials[material_id].name.c_str())) {
+            for (int i = 0; i < static_cast<int>(m_scene.materials.size()); ++i) {
                 const bool selected = i == material_id;
-                if (ImGui::Selectable(scene_.materials[i].name.c_str(), selected)) {
+                if (ImGui::Selectable(m_scene.materials[i].name.c_str(), selected)) {
                     segment.material_id = i;
                     edited = true;
                 }
@@ -601,7 +665,7 @@ void App::draw_scene_controls() {
             ImGui::EndCombo();
         }
 
-        Material& material = scene_.materials[segment.material_id];
+        Material& material = m_scene.materials[segment.material_id];
         float albedo[3] = {material.albedo.r, material.albedo.g, material.albedo.b};
         if (ImGui::ColorEdit3("Material albedo", albedo)) {
             material.albedo = {albedo[0], albedo[1], albedo[2]};
@@ -612,6 +676,14 @@ void App::draw_scene_controls() {
             material.emission = {emission[0], emission[1], emission[2]};
             edited = true;
         }
+        if (material.is_light()) {
+            float angle = material.emission_angle_deg;
+            if (ImGui::InputFloat("Emission angle deg (0-360)", &angle, 1.0f, 15.0f, "%.1f")) {
+                material.emission_angle_deg = std::max(0.0f, std::min(360.0f, angle));
+                edited = true;
+            }
+            ImGui::TextWrapped("Angle is centered around the segment normal. 180 deg matches the original one-sided light; 360 deg emits to both sides.");
+        }
 
         if (material.is_dielectric()) {
             if (ImGui::DragFloat("IOR", &material.ior, 0.01f, 1.0f, 3.0f)) {
@@ -620,19 +692,19 @@ void App::draw_scene_controls() {
         }
 
         if (edited) {
-            scene_.refresh_segment_normal_keep_side(selected_index_);
+            m_scene.refresh_segment_normal_keep_side(m_selected_index);
             mark_scene_edited();
         }
         return;
     }
 
-    if (selected_kind_ == SelectedObjectKind::Circle && selected_index_ >= 0 && selected_index_ < static_cast<int>(scene_.circles.size())) {
-        Circle& circle = scene_.circles[selected_index_];
+    if (m_selected_kind == SelectedObjectKind::Circle && m_selected_index >= 0 && m_selected_index < static_cast<int>(m_scene.circles.size())) {
+        Circle& circle = m_scene.circles[m_selected_index];
         ImGui::Separator();
-        ImGui::Text("Selected circle: %d", selected_index_);
+        ImGui::Text("Selected circle: %d", m_selected_index);
 
         if (ImGui::Button("Delete selected")) {
-            scene_.erase_circle(selected_index_);
+            m_scene.erase_circle(m_selected_index);
             clear_selection();
             mark_scene_edited();
             return;
@@ -641,8 +713,8 @@ void App::draw_scene_controls() {
         if (ImGui::Button("Duplicate")) {
             Circle copy = circle;
             copy.center += Vec2{0.2f, 0.15f};
-            selected_index_ = scene_.add_circle(copy.center, copy.radius, copy.material_id);
-            selected_kind_ = SelectedObjectKind::Circle;
+            m_selected_index = m_scene.add_circle(copy.center, copy.radius, copy.material_id);
+            m_selected_kind = SelectedObjectKind::Circle;
             mark_scene_edited();
             return;
         }
@@ -652,10 +724,10 @@ void App::draw_scene_controls() {
         edited |= ImGui::DragFloat("Radius", &circle.radius, 0.01f, 0.02f, 5.0f);
 
         int material_id = circle.material_id;
-        if (ImGui::BeginCombo("Material", scene_.materials[material_id].name.c_str())) {
-            for (int i = 0; i < static_cast<int>(scene_.materials.size()); ++i) {
+        if (ImGui::BeginCombo("Material", m_scene.materials[material_id].name.c_str())) {
+            for (int i = 0; i < static_cast<int>(m_scene.materials.size()); ++i) {
                 const bool selected = i == material_id;
-                if (ImGui::Selectable(scene_.materials[i].name.c_str(), selected)) {
+                if (ImGui::Selectable(m_scene.materials[i].name.c_str(), selected)) {
                     circle.material_id = i;
                     edited = true;
                 }
@@ -664,7 +736,7 @@ void App::draw_scene_controls() {
             ImGui::EndCombo();
         }
 
-        Material& material = scene_.materials[circle.material_id];
+        Material& material = m_scene.materials[circle.material_id];
         int kind = static_cast<int>(material.kind);
         const char* kinds[] = {"Diffuse", "Dielectric"};
         if (ImGui::Combo("Material kind", &kind, kinds, IM_ARRAYSIZE(kinds))) {
@@ -693,22 +765,22 @@ void App::draw_scene_controls() {
 }
 
 void App::draw_canvas() {
-    canvas_origin_ = ImGui::GetCursorScreenPos();
-    canvas_size_ = ImGui::GetContentRegionAvail();
-    canvas_size_.x = std::max(canvas_size_.x, 360.0f);
-    canvas_size_.y = std::max(canvas_size_.y, 360.0f);
+    m_canvas_origin = ImGui::GetCursorScreenPos();
+    m_canvas_size = ImGui::GetContentRegionAvail();
+    m_canvas_size.x = std::max(m_canvas_size.x, 360.0f);
+    m_canvas_size.y = std::max(m_canvas_size.y, 360.0f);
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    const ImVec2 canvas_max{canvas_origin_.x + canvas_size_.x, canvas_origin_.y + canvas_size_.y};
-    draw_list->AddRectFilled(canvas_origin_, canvas_max, rgba(18, 19, 23));
-    draw_list->AddRect(canvas_origin_, canvas_max, rgba(80, 84, 96));
+    const ImVec2 canvas_max{m_canvas_origin.x + m_canvas_size.x, m_canvas_origin.y + m_canvas_size.y};
+    draw_list->AddRectFilled(m_canvas_origin, canvas_max, rgba(18, 19, 23));
+    draw_list->AddRect(m_canvas_origin, canvas_max, rgba(80, 84, 96));
 
-    if (show_field_in_canvas_ && field_.texture_id() != 0) {
-        const FieldBounds b = field_.bounds();
+    if (m_show_field_in_canvas && m_field.texture_id() != 0) {
+        const FieldBounds b = m_field.bounds();
         const ImVec2 tl = world_to_screen({b.min.x, b.max.y});
         const ImVec2 br = world_to_screen({b.max.x, b.min.y});
         draw_list->AddImage(
-            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(field_.texture_id())),
+            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(m_field.texture_id())),
             tl,
             br,
             ImVec2{0.0f, 0.0f},
@@ -717,46 +789,47 @@ void App::draw_canvas() {
         draw_list->AddRect(tl, br, rgba(100, 150, 210, 180));
     }
 
-    ImGui::InvisibleButton("scene_canvas", canvas_size_, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    ImGui::InvisibleButton("scene_canvas", m_canvas_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     const bool hovered = ImGui::IsItemHovered();
     const ImGuiIO& io = ImGui::GetIO();
 
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const Vec2 world = screen_to_world(io.MousePos);
-        select_scene_handle(world, 10.0f / view_scale_);
-        if (selected_handle_ < 0) {
+        select_scene_handle(world, 10.0f / m_view_scale);
+        m_dragging_scene_handle = m_selected_handle >= 0;
+        if (!m_dragging_scene_handle) {
             int px = 0;
             int py = 0;
-            if (field_.world_to_pixel(world, px, py)) {
-                selected_pixel_x_ = px;
-                selected_pixel_y_ = py;
-                debug_uses_selected_pixel_ = true;
-                debug_world_position_ = field_.pixel_center_to_world(px, py);
+            if (m_field.world_to_pixel(world, px, py)) {
+                m_selected_pixel_x = px;
+                m_selected_pixel_y = py;
+                m_debug_uses_selected_pixel = true;
+                m_debug_world_position = m_field.pixel_center_to_world(px, py);
             } else {
-                debug_uses_selected_pixel_ = false;
-                debug_world_position_ = world;
+                m_debug_uses_selected_pixel = false;
+                m_debug_world_position = world;
             }
             retrace_debug_sample();
         }
     }
 
-    if (hovered && selected_handle_ >= 0 && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        const Vec2 delta{io.MouseDelta.x / view_scale_, -io.MouseDelta.y / view_scale_};
-        if (selected_kind_ == SelectedObjectKind::Segment && selected_index_ >= 0 && selected_index_ < static_cast<int>(scene_.segments.size())) {
+    if (hovered && m_dragging_scene_handle && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        const Vec2 delta{io.MouseDelta.x / m_view_scale, -io.MouseDelta.y / m_view_scale};
+        if (m_selected_kind == SelectedObjectKind::Segment && m_selected_index >= 0 && m_selected_index < static_cast<int>(m_scene.segments.size())) {
             if (length_squared(delta) > 0.0f) {
-                Segment& segment = scene_.segments[selected_index_];
-                if (selected_handle_ == 0 || selected_handle_ == 2) {
+                Segment& segment = m_scene.segments[m_selected_index];
+                if (m_selected_handle == 0 || m_selected_handle == 2) {
                     segment.a += delta;
                 }
-                if (selected_handle_ == 1 || selected_handle_ == 2) {
+                if (m_selected_handle == 1 || m_selected_handle == 2) {
                     segment.b += delta;
                 }
-                scene_.refresh_segment_normal_keep_side(selected_index_);
+                m_scene.refresh_segment_normal_keep_side(m_selected_index);
                 mark_scene_edited();
             }
-        } else if (selected_kind_ == SelectedObjectKind::Circle && selected_index_ >= 0 && selected_index_ < static_cast<int>(scene_.circles.size())) {
-            Circle& circle = scene_.circles[selected_index_];
-            if (selected_handle_ == 1) {
+        } else if (m_selected_kind == SelectedObjectKind::Circle && m_selected_index >= 0 && m_selected_index < static_cast<int>(m_scene.circles.size())) {
+            Circle& circle = m_scene.circles[m_selected_index];
+            if (m_selected_handle == 1) {
                 const Vec2 world = screen_to_world(io.MousePos);
                 circle.radius = std::max(0.02f, length(world - circle.center));
                 mark_scene_edited();
@@ -768,18 +841,19 @@ void App::draw_canvas() {
     }
 
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        selected_handle_ = -1;
+        m_dragging_scene_handle = false;
+        m_selected_handle = -1;
     }
 
     if (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
         const ImVec2 delta = io.MouseDelta;
-        view_center_.x -= delta.x / view_scale_;
-        view_center_.y += delta.y / view_scale_;
+        m_view_center.x -= delta.x / m_view_scale;
+        m_view_center.y += delta.y / m_view_scale;
     }
 
     if (hovered && io.MouseWheel != 0.0f) {
         const float zoom = io.MouseWheel > 0.0f ? 1.10f : 0.90f;
-        view_scale_ = std::max(25.0f, std::min(420.0f, view_scale_ * zoom));
+        m_view_scale = std::max(25.0f, std::min(420.0f, m_view_scale * zoom));
     }
 
     for (int i = -10; i <= 10; ++i) {
@@ -788,10 +862,10 @@ void App::draw_canvas() {
         draw_list->AddLine(world_to_screen({-10.0f, static_cast<float>(i)}), world_to_screen({10.0f, static_cast<float>(i)}), grid_color);
     }
 
-    for (const Segment& segment : scene_.segments) {
-        const Material& material = scene_.materials[segment.material_id];
+    for (const Segment& segment : m_scene.segments) {
+        const Material& material = m_scene.materials[segment.material_id];
         const bool light = material.is_light();
-        const bool selected = selected_kind_ == SelectedObjectKind::Segment && segment.object_id == selected_index_;
+        const bool selected = m_selected_kind == SelectedObjectKind::Segment && segment.object_id == m_selected_index;
         const ImU32 color = selected ? rgba(255, 145, 90) : (light ? rgba(255, 230, 120) : rgba(210, 215, 225));
         const float thickness = selected ? 4.0f : (light ? 4.0f : 2.0f);
         draw_list->AddLine(world_to_screen(segment.a), world_to_screen(segment.b), color, thickness);
@@ -799,32 +873,32 @@ void App::draw_canvas() {
         draw_list->AddCircleFilled(world_to_screen(segment.a), selected ? 5.5f : 3.5f, selected ? rgba(255, 145, 90) : rgba(155, 160, 170));
         draw_list->AddCircleFilled(world_to_screen(segment.b), selected ? 5.5f : 3.5f, selected ? rgba(255, 145, 90) : rgba(155, 160, 170));
 
-        if (show_normals_) {
+        if (m_show_normals) {
             const Vec2 mid = (segment.a + segment.b) * 0.5f;
             draw_arrow(draw_list, world_to_screen(mid), world_to_screen(mid + segment.normal * 0.18f), light ? rgba(255, 200, 80) : rgba(120, 145, 180), 1.0f);
         }
     }
 
-    for (const Circle& circle : scene_.circles) {
-        const Material& material = scene_.materials[circle.material_id];
-        const bool selected = selected_kind_ == SelectedObjectKind::Circle && circle.object_id == selected_index_;
+    for (const Circle& circle : m_scene.circles) {
+        const Material& material = m_scene.materials[circle.material_id];
+        const bool selected = m_selected_kind == SelectedObjectKind::Circle && circle.object_id == m_selected_index;
         const ImU32 color = selected ? rgba(255, 145, 90) : (material.is_dielectric() ? rgba(120, 220, 255) : rgba(190, 210, 230));
         const ImVec2 c = world_to_screen(circle.center);
-        const float r = circle.radius * view_scale_;
+        const float r = circle.radius * m_view_scale;
         draw_list->AddCircle(c, r, color, 64, selected ? 3.0f : 2.0f);
         draw_list->AddCircleFilled(c, selected ? 4.5f : 3.0f, selected ? rgba(255, 145, 90) : rgba(120, 220, 255));
         draw_list->AddCircleFilled(world_to_screen(circle.center + Vec2{circle.radius, 0.0f}), selected ? 4.5f : 3.0f, selected ? rgba(255, 145, 90) : rgba(120, 220, 255));
-        if (show_debug_labels_ && material.is_dielectric()) {
+        if (m_show_debug_labels && material.is_dielectric()) {
             char label[80];
             std::snprintf(label, sizeof(label), "glass ior %.2f", material.ior);
             draw_list->AddText(world_to_screen(circle.center + Vec2{-circle.radius, circle.radius + 0.05f}), rgba(160, 230, 255), label);
         }
     }
 
-    draw_list->AddCircleFilled(world_to_screen(debug_world_position_), 5.5f, rgba(255, 140, 90));
-    if (show_debug_labels_) {
-        const char* src = debug_uses_selected_pixel_ ? "selected pixel sample" : "exact world sample";
-        draw_list->AddText(world_to_screen(debug_world_position_ + Vec2{0.08f, 0.08f}), rgba(255, 185, 140), src);
+    draw_list->AddCircleFilled(world_to_screen(m_debug_world_position), 5.5f, rgba(255, 140, 90));
+    if (m_show_debug_labels) {
+        const char* src = m_debug_uses_selected_pixel ? "selected pixel sample" : "exact world sample";
+        draw_list->AddText(world_to_screen(m_debug_world_position + Vec2{0.08f, 0.08f}), rgba(255, 185, 140), src);
     }
 
     draw_debug_events();
@@ -833,22 +907,22 @@ void App::draw_canvas() {
 void App::draw_debug_events() {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
-    for (const DebugEvent& event : debug_recorder_.events()) {
+    for (const DebugEvent& event : m_debug_recorder.events()) {
         const ImU32 color = depth_color(event.depth);
         switch (event.type) {
             case DebugEventType::RaySegment:
-                if (show_debug_rays_) {
+                if (m_show_debug_rays) {
                     draw_arrow(draw_list, world_to_screen(event.ray_origin), world_to_screen(event.ray_end), color, 2.0f);
                 }
                 break;
 
             case DebugEventType::Hit:
-                if (show_debug_hits_) {
+                if (m_show_debug_hits) {
                     draw_list->AddCircleFilled(world_to_screen(event.hit_point), 4.5f, color);
-                    if (show_normals_) {
+                    if (m_show_normals) {
                         draw_arrow(draw_list, world_to_screen(event.hit_point), world_to_screen(event.hit_point + event.normal * 0.25f), rgba(180, 255, 180), 1.5f);
                     }
-                    if (show_debug_labels_) {
+                    if (m_show_debug_labels) {
                         char label[80];
                         std::snprintf(label, sizeof(label), "d%d obj%d", event.depth, event.object_id);
                         draw_list->AddText(world_to_screen(event.hit_point + event.normal * 0.35f), rgba(230, 235, 245), label);
@@ -857,10 +931,10 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::BsdfSample:
-                if (show_debug_rays_) {
+                if (m_show_debug_rays) {
                     const float len = event.depth < 0 ? 0.75f : 0.55f;
                     draw_arrow(draw_list, world_to_screen(event.hit_point), world_to_screen(event.hit_point + event.sampled_dir * len), event.depth < 0 ? rgba(255, 145, 90) : rgba(255, 210, 120), 1.5f);
-                    if (show_debug_labels_) {
+                    if (m_show_debug_labels) {
                         char label[96];
                         std::snprintf(label, sizeof(label), event.depth < 0 ? "initial pdf %.3f" : "pdf %.3f", event.pdf);
                         draw_list->AddText(world_to_screen(event.hit_point + event.sampled_dir * (len + 0.10f)), rgba(255, 230, 160), label);
@@ -870,10 +944,10 @@ void App::draw_debug_events() {
 
             case DebugEventType::LightSample:
                 draw_list->AddCircleFilled(world_to_screen(event.sampled_point), 5.5f, rgba(255, 240, 120));
-                if (show_debug_rays_) {
+                if (m_show_debug_rays) {
                     draw_list->AddLine(world_to_screen(event.hit_point), world_to_screen(event.sampled_point), event.blocked ? rgba(160, 90, 90, 150) : rgba(255, 235, 120, 180), 1.0f);
                 }
-                if (show_debug_labels_) {
+                if (m_show_debug_labels) {
                     char label[192];
                     std::snprintf(label, sizeof(label), "G_N=%.4f\nL_N=%.4f", event.geometric_term, luminance(event.l_nee));
                     draw_list->AddText(world_to_screen(event.sampled_point + Vec2{0.05f, 0.05f}), event.blocked ? rgba(255, 120, 120) : rgba(255, 245, 150), label);
@@ -881,13 +955,13 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::ShadowRay:
-                if (show_debug_rays_) {
+                if (m_show_debug_rays) {
                     draw_list->AddLine(world_to_screen(event.ray_origin), world_to_screen(event.ray_end), event.blocked ? rgba(255, 80, 80) : rgba(120, 255, 150), 1.5f);
                 }
                 break;
 
             case DebugEventType::DirectContribution:
-                if (show_debug_labels_) {
+                if (m_show_debug_labels) {
                     char label[224];
                     std::snprintf(label, sizeof(label), "L_N=%.4f\nL_P=%.4f\nL=%.4f",
                         luminance(event.l_nee),
@@ -898,9 +972,9 @@ void App::draw_debug_events() {
                 break;
 
             case DebugEventType::HitLight:
-                if (show_debug_hits_) {
+                if (m_show_debug_hits) {
                     draw_list->AddCircleFilled(world_to_screen(event.hit_point), 7.0f, rgba(255, 240, 130));
-                    if (show_debug_labels_) {
+                    if (m_show_debug_labels) {
                         char label[128];
                         std::snprintf(label, sizeof(label), "hit light\nL_P=%.4f", luminance(event.l_path));
                         draw_list->AddText(world_to_screen(event.hit_point + event.normal * 0.35f), rgba(255, 245, 150), label);
@@ -916,94 +990,104 @@ void App::draw_debug_events() {
 }
 
 void App::retrace_debug_sample() {
-    debug_recorder_.clear();
+    m_debug_recorder.clear();
 
-    Sampler sampler(settings_.seed);
-    if (debug_uses_selected_pixel_) {
-        selected_pixel_x_ = std::clamp(selected_pixel_x_, 0, std::max(0, field_.width() - 1));
-        selected_pixel_y_ = std::clamp(selected_pixel_y_, 0, std::max(0, field_.height() - 1));
+    Sampler sampler(m_settings.seed);
+    if (m_debug_uses_selected_pixel) {
+        m_selected_pixel_x = std::clamp(m_selected_pixel_x, 0, std::max(0, m_field.width() - 1));
+        m_selected_pixel_y = std::clamp(m_selected_pixel_y, 0, std::max(0, m_field.height() - 1));
 
-        sampler = Sampler(field_.seed_for_pixel(selected_pixel_x_, selected_pixel_y_, debug_sample_index_, settings_));
-        debug_world_position_ = field_.pixel_center_to_world(selected_pixel_x_, selected_pixel_y_);
+        sampler = Sampler(m_field.seed_for_pixel(m_selected_pixel_x, m_selected_pixel_y, m_debug_sample_index, m_settings));
+        m_debug_world_position = m_field.pixel_center_to_world(m_selected_pixel_x, m_selected_pixel_y);
     } else {
-        uint64_t seed = settings_.seed;
-        seed = hash_combine(seed, kind_to_seed(settings_.kind));
-        seed = hash_combine(seed, static_cast<uint64_t>(debug_sample_index_));
-        seed = hash_combine(seed, static_cast<uint64_t>((debug_world_position_.x + 1000.0f) * 1000.0f));
-        seed = hash_combine(seed, static_cast<uint64_t>((debug_world_position_.y + 1000.0f) * 1000.0f));
-        sampler = Sampler(seed);
+        sampler = Sampler(world_sample_seed(m_settings, m_debug_world_position, m_debug_sample_index));
     }
 
-    estimate_at(scene_, debug_world_position_, sampler, settings_, &debug_recorder_);
+    PhotonMap photon_map;
+    const PhotonMap* photon_map_ptr = nullptr;
+    if (m_settings.kind == IntegratorKind::PhotonMapping) {
+        const uint64_t photon_seed = hash_combine(sample_seed_base(m_settings), static_cast<uint64_t>(m_debug_sample_index) ^ 0x70686f746f6eULL);
+        photon_map = build_photon_map(m_scene, m_settings, photon_seed);
+        photon_map_ptr = &photon_map;
+    }
+
+    estimate_at(m_scene, m_debug_world_position, sampler, m_settings, &m_debug_recorder, photon_map_ptr);
 }
 
 
 void App::save_scene() {
     SceneDocumentSettings document_settings;
-    document_settings.integrator = settings_;
-    document_settings.field_bounds_min = field_bounds_.min;
-    document_settings.field_bounds_max = field_bounds_.max;
-    document_settings.field_width = field_width_;
-    document_settings.field_height = field_height_;
-    document_settings.samples_per_frame = samples_per_frame_;
-    document_settings.stop_after_samples = stop_after_samples_;
+    document_settings.integrator = m_settings;
+    document_settings.field_bounds_min = m_field_bounds.min;
+    document_settings.field_bounds_max = m_field_bounds.max;
+    document_settings.field_width = m_field_width;
+    document_settings.field_height = m_field_height;
+    document_settings.samples_per_frame = m_samples_per_frame;
+    document_settings.stop_after_samples = m_stop_after_samples;
 
     std::string error;
-    const bool ok = save_scene_json(scene_json_path_, scene_, document_settings, &error);
-    scene_status_ = ok ? ("Saved scene: " + scene_json_path_) : ("Failed to save scene: " + error);
+    const bool ok = save_scene_json(m_scene_json_path, m_scene, document_settings, &error);
+    m_scene_status = ok ? ("Saved scene: " + m_scene_json_path) : ("Failed to save scene: " + error);
 }
 
 void App::load_scene() {
     Scene next_scene;
     SceneDocumentSettings document_settings;
-    document_settings.integrator = settings_;
-    document_settings.field_bounds_min = field_bounds_.min;
-    document_settings.field_bounds_max = field_bounds_.max;
-    document_settings.field_width = field_width_;
-    document_settings.field_height = field_height_;
-    document_settings.samples_per_frame = samples_per_frame_;
-    document_settings.stop_after_samples = stop_after_samples_;
+    document_settings.integrator = m_settings;
+    document_settings.field_bounds_min = m_field_bounds.min;
+    document_settings.field_bounds_max = m_field_bounds.max;
+    document_settings.field_width = m_field_width;
+    document_settings.field_height = m_field_height;
+    document_settings.samples_per_frame = m_samples_per_frame;
+    document_settings.stop_after_samples = m_stop_after_samples;
 
     std::string error;
-    const bool ok = load_scene_json(scene_json_path_, next_scene, document_settings, &error);
+    const bool ok = load_scene_json(m_scene_json_path, next_scene, document_settings, &error);
     if (!ok) {
-        scene_status_ = "Failed to load scene: " + error;
+        m_scene_status = "Failed to load scene: " + error;
         return;
     }
 
-    scene_ = std::move(next_scene);
-    settings_ = document_settings.integrator;
-    field_bounds_.min = document_settings.field_bounds_min;
-    field_bounds_.max = document_settings.field_bounds_max;
-    field_width_ = document_settings.field_width;
-    field_height_ = document_settings.field_height;
-    samples_per_frame_ = document_settings.samples_per_frame;
-    stop_after_samples_ = document_settings.stop_after_samples;
+    m_scene = std::move(next_scene);
+    m_settings = document_settings.integrator;
+    m_field_bounds.min = document_settings.field_bounds_min;
+    m_field_bounds.max = document_settings.field_bounds_max;
+    m_field_width = document_settings.field_width;
+    m_field_height = document_settings.field_height;
+    m_samples_per_frame = document_settings.samples_per_frame;
+    m_stop_after_samples = document_settings.stop_after_samples;
     clear_selection();
-    render_paused_ = false;
+    m_render_paused = false;
     reset_accumulation();
     retrace_debug_sample();
-    scene_status_ = "Loaded scene: " + scene_json_path_;
+    m_scene_status = "Loaded scene: " + m_scene_json_path;
 }
 
 void App::reset_accumulation() {
-    if (field_bounds_.min.x > field_bounds_.max.x) std::swap(field_bounds_.min.x, field_bounds_.max.x);
-    if (field_bounds_.min.y > field_bounds_.max.y) std::swap(field_bounds_.min.y, field_bounds_.max.y);
-    field_.reset(field_width_, field_height_, field_bounds_);
-    debug_sample_index_ = 0;
+    if (m_field_bounds.min.x > m_field_bounds.max.x) std::swap(m_field_bounds.min.x, m_field_bounds.max.x);
+    if (m_field_bounds.min.y > m_field_bounds.max.y) std::swap(m_field_bounds.min.y, m_field_bounds.max.y);
+    m_field.reset(m_field_width, m_field_height, m_field_bounds);
+    m_debug_sample_index = 0;
+
+    // When auto-stop has paused rendering at the target sample count, any scene
+    // edit or render-setting reset must start a fresh accumulation run.
+    // Keep manual pause behavior unchanged when auto-stop is disabled.
+    if (m_stop_after_samples > 0) {
+        m_render_paused = false;
+    }
 }
 
 ImVec2 App::world_to_screen(Vec2 p) const {
     return {
-        canvas_origin_.x + canvas_size_.x * 0.5f + (p.x - view_center_.x) * view_scale_,
-        canvas_origin_.y + canvas_size_.y * 0.5f - (p.y - view_center_.y) * view_scale_,
+        m_canvas_origin.x + m_canvas_size.x * 0.5f + (p.x - m_view_center.x) * m_view_scale,
+        m_canvas_origin.y + m_canvas_size.y * 0.5f - (p.y - m_view_center.y) * m_view_scale,
     };
 }
 
 Vec2 App::screen_to_world(ImVec2 p) const {
     return {
-        (p.x - canvas_origin_.x - canvas_size_.x * 0.5f) / view_scale_ + view_center_.x,
-        -(p.y - canvas_origin_.y - canvas_size_.y * 0.5f) / view_scale_ + view_center_.y,
+        (p.x - m_canvas_origin.x - m_canvas_size.x * 0.5f) / m_view_scale + m_view_center.x,
+        -(p.y - m_canvas_origin.y - m_canvas_size.y * 0.5f) / m_view_scale + m_view_center.y,
     };
 }
 
@@ -1019,16 +1103,16 @@ float App::distance_to_segment(Vec2 p, Vec2 a, Vec2 b) const {
 }
 
 void App::select_scene_handle(Vec2 world, float radius_world) {
-    selected_handle_ = -1;
-    selected_kind_ = SelectedObjectKind::None;
-    selected_index_ = -1;
+    m_selected_handle = -1;
+    m_selected_kind = SelectedObjectKind::None;
+    m_selected_index = -1;
 
     float best_distance = radius_world;
     SelectedObjectKind best_kind = SelectedObjectKind::None;
     int best_index = -1;
     int best_handle = -1;
 
-    for (const Segment& segment : scene_.segments) {
+    for (const Segment& segment : m_scene.segments) {
         const float da = length(world - segment.a);
         if (da < best_distance) {
             best_distance = da;
@@ -1045,7 +1129,7 @@ void App::select_scene_handle(Vec2 world, float radius_world) {
         }
     }
 
-    for (const Circle& circle : scene_.circles) {
+    for (const Circle& circle : m_scene.circles) {
         const Vec2 radius_point = circle.center + Vec2{circle.radius, 0.0f};
         const float dr = length(world - radius_point);
         if (dr < best_distance) {
@@ -1065,7 +1149,7 @@ void App::select_scene_handle(Vec2 world, float radius_world) {
 
     if (best_kind == SelectedObjectKind::None) {
         float segment_best = radius_world * 0.75f;
-        for (const Segment& segment : scene_.segments) {
+        for (const Segment& segment : m_scene.segments) {
             const float d = distance_to_segment(world, segment.a, segment.b);
             if (d < segment_best) {
                 segment_best = d;
@@ -1077,7 +1161,7 @@ void App::select_scene_handle(Vec2 world, float radius_world) {
     }
 
     if (best_kind == SelectedObjectKind::None) {
-        for (const Circle& circle : scene_.circles) {
+        for (const Circle& circle : m_scene.circles) {
             const float d = std::abs(length(world - circle.center) - circle.radius);
             if (d < radius_world * 0.75f) {
                 best_kind = SelectedObjectKind::Circle;
@@ -1095,44 +1179,45 @@ void App::select_scene_handle(Vec2 world, float radius_world) {
     }
 
     if (best_kind != SelectedObjectKind::None) {
-        selected_kind_ = best_kind;
-        selected_index_ = best_index;
-        selected_handle_ = best_handle;
+        m_selected_kind = best_kind;
+        m_selected_index = best_index;
+        m_selected_handle = best_handle;
     }
 }
 
 int App::ensure_material(const char* name, Material material) {
-    const int existing = scene_.find_material_by_name(name);
+    const int existing = m_scene.find_material_by_name(name);
     if (existing >= 0) {
         return existing;
     }
     material.name = name;
-    return scene_.add_material(material);
+    return m_scene.add_material(material);
 }
 
 int App::default_wall_material() const {
-    const int id = scene_.find_material_by_name("white diffuse");
+    const int id = m_scene.find_material_by_name("white diffuse");
     return id >= 0 ? id : 0;
 }
 
 int App::default_light_material() const {
-    const int id = scene_.find_material_by_name("area light");
+    const int id = m_scene.find_material_by_name("area light");
     return id >= 0 ? id : 0;
 }
 
 int App::default_glass_material() const {
-    const int id = scene_.find_material_by_name("glass dielectric");
+    const int id = m_scene.find_material_by_name("glass dielectric");
     return id >= 0 ? id : 0;
 }
 
 void App::clear_selection() {
-    selected_kind_ = SelectedObjectKind::None;
-    selected_index_ = -1;
-    selected_handle_ = -1;
+    m_selected_kind = SelectedObjectKind::None;
+    m_selected_index = -1;
+    m_selected_handle = -1;
+    m_dragging_scene_handle = false;
 }
 
 void App::mark_scene_edited() {
-    scene_.rebuild_light_segment_ids();
+    m_scene.rebuild_light_segment_ids();
     reset_accumulation();
     retrace_debug_sample();
 }
