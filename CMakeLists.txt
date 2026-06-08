@@ -29,6 +29,7 @@ if(NOT imgui_POPULATED)
 endif()
 
 find_package(OpenGL REQUIRED)
+find_package(OpenMP QUIET)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -51,11 +52,19 @@ add_executable(pathtracing_2d
     src/pt2d/Scene.cpp
     src/pt2d/PngWriter.cpp
     src/pt2d/SceneSerializer.cpp
+    src/pt2d/ProductionApp.cpp
     src/pt2d/RISDirection.cpp
  )
 
 target_include_directories(pathtracing_2d PRIVATE src)
 target_link_libraries(pathtracing_2d PRIVATE imgui glfw OpenGL::GL)
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(pathtracing_2d PRIVATE OpenMP::OpenMP_CXX)
+    message(STATUS "OpenMP enabled")
+else()
+    message(WARNING "OpenMP was not found; production rendering will build without OpenMP parallelism")
+endif()
 
 if(APPLE)
     target_compile_definitions(pathtracing_2d PRIVATE GL_SILENCE_DEPRECATION)
