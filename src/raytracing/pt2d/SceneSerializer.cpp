@@ -380,6 +380,8 @@ void write_material(std::ostream& os, const Material& m, int indent) {
     write_indent(os, inner); os << "\"albedo\": "; write_color(os, m.albedo); os << ",\n";
     write_indent(os, inner); os << "\"emission\": "; write_color(os, m.emission); os << ",\n";
     write_indent(os, inner); os << "\"ior\": " << m.ior << ",\n";
+    write_indent(os, inner); os << "\"cauchy_a\": " << m.cauchy_a << ",\n";
+    write_indent(os, inner); os << "\"cauchy_b\": " << m.cauchy_b << ",\n";
     write_indent(os, inner); os << "\"emission_angle_deg\": " << m.emission_angle_deg << "\n";
     write_indent(os, indent); os << "}";
 }
@@ -398,8 +400,18 @@ bool read_material_object(const JsonValue& value, Material& material, std::strin
     read_color(value, "albedo", material.albedo);
     read_color(value, "emission", material.emission);
     read_number(value, "ior", material.ior);
+    const bool has_cauchy_a = read_number(value, "cauchy_a", material.cauchy_a);
+    const bool has_cauchy_b = read_number(value, "cauchy_b", material.cauchy_b);
     read_number(value, "emission_angle_deg", material.emission_angle_deg);
     material.ior = std::max(1.0f, material.ior);
+    if (!has_cauchy_a) {
+        material.cauchy_a = material.ior;
+    }
+    if (!has_cauchy_b) {
+        material.cauchy_b = 0.0f;
+    }
+    material.cauchy_a = std::max(1.0f, material.cauchy_a);
+    material.cauchy_b = std::max(0.0f, material.cauchy_b);
     material.emission_angle_deg = std::max(0.0f, std::min(360.0f, material.emission_angle_deg));
     return true;
 }
@@ -420,6 +432,9 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
     out << "    \"integrator\": \"" << integrator_kind_to_string(settings.integrator.kind) << "\",\n";
     out << "    \"max_depth\": " << settings.integrator.max_depth << ",\n";
     out << "    \"seed\": " << settings.integrator.seed << ",\n";
+    out << "    \"spectral_enabled\": " << (settings.integrator.spectral.enabled ? "true" : "false") << ",\n";
+    out << "    \"spectral_wavelength_samples\": " << settings.integrator.spectral.wavelength_samples << ",\n";
+    out << "    \"spectral_xyz_importance\": " << (settings.integrator.spectral.xyz_importance ? "true" : "false") << ",\n";
     out << "    \"photon_count\": " << settings.integrator.photon_mapping.photon_count << ",\n";
     out << "    \"photon_max_depth\": " << settings.integrator.photon_mapping.photon_max_depth << ",\n";
     out << "    \"photon_gather_radius\": " << settings.integrator.photon_mapping.gather_radius << ",\n";
@@ -507,6 +522,9 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
         }
         read_number(*renderer, "max_depth", next_settings.integrator.max_depth);
         read_number(*renderer, "seed", next_settings.integrator.seed);
+        read_bool(*renderer, "spectral_enabled", next_settings.integrator.spectral.enabled);
+        read_number(*renderer, "spectral_wavelength_samples", next_settings.integrator.spectral.wavelength_samples);
+        read_bool(*renderer, "spectral_xyz_importance", next_settings.integrator.spectral.xyz_importance);
         read_number(*renderer, "photon_count", next_settings.integrator.photon_mapping.photon_count);
         read_number(*renderer, "photon_max_depth", next_settings.integrator.photon_mapping.photon_max_depth);
         read_number(*renderer, "photon_gather_radius", next_settings.integrator.photon_mapping.gather_radius);
@@ -581,6 +599,7 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
     next_settings.field_height = std::max(1, next_settings.field_height);
     next_settings.samples_per_frame = std::max(1, next_settings.samples_per_frame);
     next_settings.stop_after_samples = std::max(0, next_settings.stop_after_samples);
+    next_settings.integrator.spectral.wavelength_samples = std::clamp(next_settings.integrator.spectral.wavelength_samples, 1, 64);
 
     next_scene.rebuild_light_segment_ids();
     scene = std::move(next_scene);

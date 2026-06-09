@@ -789,6 +789,18 @@ void App::draw_field_panel() {
         changed = true;
     }
 
+    ImGui::Separator();
+    ImGui::TextUnformatted("Spectral rendering");
+    changed |= ImGui::Checkbox("Enable spectral (PathTracing/RISDirection)", &m_settings.spectral.enabled);
+    changed |= ImGui::SliderInt("Wavelength samples", &m_settings.spectral.wavelength_samples, 1, 64);
+    changed |= ImGui::Checkbox("XYZ importance sampling", &m_settings.spectral.xyz_importance);
+    m_settings.spectral.wavelength_samples = std::clamp(m_settings.spectral.wavelength_samples, 1, 64);
+    if (m_settings.spectral.enabled
+        && m_settings.kind != IntegratorKind::PathTracing
+        && m_settings.kind != IntegratorKind::RISDirection) {
+        ImGui::TextWrapped("Spectral rendering is currently implemented for Path tracing and RIS Direction. Other integrators ignore this setting for now.");
+    }
+
     if (m_settings.kind == IntegratorKind::RISDirection) {
         ImGui::Separator();
         ImGui::TextUnformatted("RIS direction");
@@ -2004,8 +2016,20 @@ bool App::draw_material_editor(Material& material) {
     if (material.is_dielectric()) {
         if (ImGui::DragFloat("IOR", &material.ior, 0.01f, 1.0f, 3.0f)) {
             material.ior = std::max(1.0f, material.ior);
+            if (std::abs(material.cauchy_b) <= 1.0e-8f) {
+                material.cauchy_a = material.ior;
+            }
             edited = true;
         }
+        if (ImGui::DragFloat("Cauchy A", &material.cauchy_a, 0.001f, 1.0f, 3.0f, "%.4f")) {
+            material.cauchy_a = std::max(1.0f, material.cauchy_a);
+            edited = true;
+        }
+        if (ImGui::DragFloat("Cauchy B (um^2)", &material.cauchy_b, 0.0001f, 0.0f, 0.2f, "%.5f")) {
+            material.cauchy_b = std::max(0.0f, material.cauchy_b);
+            edited = true;
+        }
+        ImGui::TextDisabled("Spectral IOR: eta(lambda_um) = A + B / lambda_um^2");
     }
 
     return edited;
@@ -2016,7 +2040,7 @@ Material App::default_wall_material() const {
 }
 
 Material App::default_light_material() const {
-    return {"light", make_color(0.0f), make_color(8.0f, 7.5f, 6.5f), MaterialKind::Diffuse, 1.0f, 180.0f};
+    return {"light", make_color(0.0f), make_color(8.0f, 7.5f, 6.5f), MaterialKind::Diffuse, 1.0f, 1.0f, 0.0f, 180.0f};
 }
 
 Material App::default_glass_material() const {

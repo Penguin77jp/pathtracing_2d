@@ -216,22 +216,38 @@ namespace pt2d {
 		invalidate_distribution_cache();
 	}
 
+	void RISDirection::update(std::vector<RISDirection::AngularSample>& angular_samples, std::vector<float>& weighted_contributions){
+		const size_t N = std::min(angular_samples.size(), weighted_contributions.size());
+		if (N == 0) {
+			return;
+		}
+
+		std::vector<float> sanitized_weights(N, 0.0f);
+		for (size_t i = 0; i < N; ++i) {
+			const float w = weighted_contributions[i];
+			sanitized_weights[i] = (std::isfinite(w) && w > 0.0f) ? w : 0.0f;
+		}
+
+		const float weight_sum = sum_vector(sanitized_weights);
+		int selected_index = random_weight_selection(sanitized_weights, weight_sum, m_sampler);
+		if (selected_index < 0) {
+			return;
+		}
+
+		if (static_cast<size_t>(selected_index) >= N) {
+			selected_index = static_cast<int>(N - 1);
+		}
+
+		update(angular_samples[static_cast<size_t>(selected_index)].theta, sanitized_weights[static_cast<size_t>(selected_index)]);
+	}
+
 	void RISDirection::update(std::vector<RISDirection::AngularSample>& angular_samples, std::vector<Color>& weighted_contributions){
 		const size_t N = angular_samples.size();
 		std::vector<float> weighted_contributions_alpha(N);
 		for (size_t i = 0; i < N; ++i) {
 			weighted_contributions_alpha[i] = std::max(weighted_contributions[i].r, std::max(weighted_contributions[i].g, weighted_contributions[i].b));
 		}
-		const float weighted_contributions_alpha_sum = sum_vector(weighted_contributions_alpha);
-		int selected_index = random_weight_selection(weighted_contributions_alpha, weighted_contributions_alpha_sum, m_sampler);
-		if (selected_index < 0)
-			return;
-
-		if (static_cast<size_t>(selected_index) >= N) {
-			selected_index = static_cast<int>(N - 1);
-		}
-
-		update(angular_samples[static_cast<size_t>(selected_index)].theta, weighted_contributions_alpha[static_cast<size_t>(selected_index)]);
+		update(angular_samples, weighted_contributions_alpha);
 	}
 
 	size_t RISDirection::bin_index(const float theta) const

@@ -32,12 +32,19 @@ struct RISDirectionSettings {
     int candidate_count = 16;
 };
 
+struct SpectralSettings {
+    bool enabled = false;
+    int wavelength_samples = 1;
+    bool xyz_importance = true;
+};
+
 struct IntegratorSettings {
     IntegratorKind kind = IntegratorKind::PathTracing;
     int max_depth = 6;
     uint64_t seed = 1;
     PhotonMappingSettings photon_mapping;
 	RISDirectionSettings ris_direction;
+	SpectralSettings spectral;
 };
 
 struct Photon {

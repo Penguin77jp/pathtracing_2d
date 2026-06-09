@@ -19,6 +19,10 @@ struct Material {
     Color emission = make_color(0.0f);
     MaterialKind kind = MaterialKind::Diffuse;
     float ior = 1.5f;
+    // Spectral rendering uses Cauchy's equation: eta(lambda_um) = A + B / lambda_um^2.
+    // Keep B=0 to match the RGB/non-spectral IOR. Increase B to exaggerate dispersion.
+    float cauchy_a = 1.5f;
+    float cauchy_b = 0.0f;
     float emission_angle_deg = 180.0f; // Light emission cone angle around segment normal. 360 = two-sided/full angle.
 
     bool is_light() const { return !is_black(emission); }
