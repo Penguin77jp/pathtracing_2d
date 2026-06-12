@@ -464,6 +464,25 @@ RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y, const Inte
     return &m_ris_direction[static_cast<size_t>(y * m_width + x)];
 }
 
+
+void FieldAccumulator::propagate_ris_directions_spatial(const IntegratorSettings& settings, int completed_sample_index) {
+    if (settings.kind != IntegratorKind::RISDirection || !settings.ris_direction.spatial_reuse_enabled) {
+        return;
+    }
+    if (m_ris_direction.size() != static_cast<size_t>(m_width * m_height)) {
+        return;
+    }
+
+    const int radius = std::clamp(settings.ris_direction.spatial_radius, 0, 8);
+    const float strength = std::clamp(settings.ris_direction.spatial_strength, 0.0f, 1.0f);
+    const int interval = std::max(1, settings.ris_direction.spatial_interval);
+    if (radius <= 0 || strength <= 0.0f || ((completed_sample_index + 1) % interval) != 0) {
+        return;
+    }
+
+    propagate_spatial_ris_direction_scores(m_ris_direction, m_width, m_height, radius, strength);
+}
+
 const RISDirection* FieldAccumulator::ris_direction_for_pixel(int x, int y) const {
     if (m_width <= 0 || m_height <= 0) {
         return nullptr;
@@ -551,6 +570,8 @@ void FieldAccumulator::accumulate(const Scene& scene, const IntegratorSettings& 
                 }
             }
         }
+
+        propagate_ris_directions_spatial(settings, sample_index);
     }
     m_samples += spp;
 }
@@ -808,11 +829,18 @@ void App::draw_field_panel() {
         changed |= ImGui::DragFloat("RIS exploration %", &m_settings.ris_direction.min_probability_percent, 0.5f, 0.0f, 100.0f, "%.1f");
         changed |= ImGui::SliderInt("RIS smooth sigma deg", &m_settings.ris_direction.smooth_sigma_deg, 0, 180);
         changed |= ImGui::SliderInt("RIS candidate count", &m_settings.ris_direction.candidate_count, 1, 128);
+        changed |= ImGui::Checkbox("Spatial RIS sharing", &m_settings.ris_direction.spatial_reuse_enabled);
+        changed |= ImGui::SliderInt("Spatial radius", &m_settings.ris_direction.spatial_radius, 1, 8);
+        changed |= ImGui::DragFloat("Spatial strength", &m_settings.ris_direction.spatial_strength, 0.01f, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderInt("Spatial interval", &m_settings.ris_direction.spatial_interval, 1, 16);
         m_settings.ris_direction.num_bins = std::clamp(m_settings.ris_direction.num_bins, 1, 256);
         m_settings.ris_direction.min_probability_percent = std::clamp(m_settings.ris_direction.min_probability_percent, 0.0f, 100.0f);
         m_settings.ris_direction.smooth_sigma_deg = std::clamp(m_settings.ris_direction.smooth_sigma_deg, 0, 180);
         m_settings.ris_direction.candidate_count = std::clamp(m_settings.ris_direction.candidate_count, 1, 128);
-        ImGui::TextWrapped("RIS direction learns a per-pixel angular distribution. Changing these settings resets accumulation and rebuilds the RIS state.");
+        m_settings.ris_direction.spatial_radius = std::clamp(m_settings.ris_direction.spatial_radius, 1, 8);
+        m_settings.ris_direction.spatial_strength = std::clamp(m_settings.ris_direction.spatial_strength, 0.0f, 1.0f);
+        m_settings.ris_direction.spatial_interval = std::clamp(m_settings.ris_direction.spatial_interval, 1, 16);
+        ImGui::TextWrapped("RIS direction learns a per-pixel angular distribution. Spatial sharing blends nearby per-pixel score bins after each sample pass. Changing these settings resets accumulation and rebuilds the RIS state.");
     }
 
     if (m_settings.kind == IntegratorKind::PhotonMapping) {

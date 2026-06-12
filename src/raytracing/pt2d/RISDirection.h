@@ -51,5 +51,14 @@ namespace pt2d {
 		mutable std::vector<float> m_bin_prob_cache;
 		mutable std::vector<float> m_cdf_cache;
 	};
-	
+// Blend per-pixel RISDirection score buffers with nearby pixels.
+// This only changes the proposal distribution learned for future samples; it never
+// reuses radiance contributions directly.
+void propagate_spatial_ris_direction_scores(
+    std::vector<RISDirection>& ris_directions,
+    int width,
+    int height,
+    int radius,
+    float strength);
+
 } // namespace

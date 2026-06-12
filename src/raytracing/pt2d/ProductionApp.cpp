@@ -47,7 +47,7 @@ namespace pt2d {
 namespace {
 
 constexpr char kRenderStateMagic[8] = {'P', 'T', '2', 'D', 'S', 'T', 'A', 'T'};
-constexpr std::uint32_t kRenderStateVersion = 1;
+constexpr std::uint32_t kRenderStateVersion = 2;
 
 uint64_t integrator_kind_seed(IntegratorKind kind) {
     return static_cast<uint64_t>(static_cast<int>(kind) + 1) * 0x9e3779b97f4a7c15ULL;
@@ -104,12 +104,21 @@ int clamp_render_dimension(int value) {
     return std::clamp(value, 1, 16384);
 }
 
-void make_rgba_from_accum(const std::vector<Color>& accum, int samples, int width, int height, std::vector<unsigned char>& rgba) {
+float sanitize_exposure(float exposure) {
+    if (!std::isfinite(exposure)) {
+        return 1.0f;
+    }
+    return std::clamp(exposure, 0.0f, 100.0f);
+}
+
+void make_rgba_from_accum(const std::vector<Color>& accum, int samples, int width, int height, float exposure, std::vector<unsigned char>& rgba) {
     rgba.assign(static_cast<std::size_t>(std::max(1, width) * std::max(1, height) * 4), 0);
     const float inv_samples = samples > 0 ? 1.0f / static_cast<float>(samples) : 0.0f;
+    exposure = sanitize_exposure(exposure);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             Color c = samples > 0 ? accum[static_cast<std::size_t>(y * width + x)] * inv_samples : make_color(0.0f);
+            c *= exposure;
             c = clamp(tonemap(c));
             const std::size_t i = static_cast<std::size_t>((y * width + x) * 4);
             rgba[i + 0] = to_srgb8(c.r);
@@ -548,6 +557,58 @@ void ProductionApp::draw_control_panel(const ImVec2& size) {
     ImGui::TextDisabled("Threads: 0 = auto");
     ImGui::EndDisabled();
 
+    ImGui::Separator();
+    ImGui::TextUnformatted("Output tonemapping");
+    float new_exposure = m_exposure.load();
+    bool exposure_changed = ImGui::DragFloat("Exposure", &new_exposure, 0.05f, 0.0f, 100.0f, "%.3f");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset##Exposure")) {
+        new_exposure = 1.0f;
+        exposure_changed = true;
+    }
+    if (exposure_changed) {
+        new_exposure = sanitize_exposure(new_exposure);
+        const bool can_refresh_now = !busy;
+        {
+            std::lock_guard<std::mutex> lock(m_data_mutex);
+            m_exposure.store(new_exposure);
+            if (can_refresh_now) {
+                update_preview_from_accum_locked(false);
+            }
+        }
+        m_last_event = can_refresh_now ? "Exposure changed" : "Exposure changed; preview updates on next refresh";
+    }
+    ImGui::TextDisabled("Exposure affects preview/PNG only. The linear accumulation buffer is unchanged.");
+    ImGui::BeginDisabled(busy || m_atomic_current_spp.load() <= 0);
+    if (ImGui::Button("Save PNG with current exposure", ImVec2(-FLT_MIN, 28.0f))) {
+        if (save_current_png_to_path(m_output_png_path)) {
+            m_last_event = "PNG saved with current exposure";
+            write_log("PNG saved with current exposure: " + m_output_png_path);
+        } else {
+            write_log("PNG save failed with current exposure");
+        }
+    }
+    if (ImGui::Button("Save renderstate with current exposure", ImVec2(-FLT_MIN, 28.0f))) {
+        RenderJobSnapshot job;
+        job.scene = m_scene;
+        job.settings = m_doc_settings;
+        job.settings.field_width = clamp_render_dimension(m_width);
+        job.settings.field_height = clamp_render_dimension(m_height);
+        job.scene_json_text = m_scene_json_text;
+        job.scene_path = m_scene_path;
+        job.output_png_path = m_output_png_path;
+        job.renderstate_path = m_renderstate_path;
+        job.target_spp = m_target_spp;
+        job.thread_count = m_thread_count;
+        if (save_renderstate_to_path(m_renderstate_path, job)) {
+            m_last_event = "Renderstate saved with current exposure";
+            write_log("Renderstate saved with current exposure: " + m_renderstate_path);
+        } else {
+            write_log("Renderstate save failed with current exposure");
+        }
+    }
+    ImGui::EndDisabled();
+
     ImGui::Spacing();
 
     if (idle_like) {
@@ -696,6 +757,7 @@ void ProductionApp::start_render(bool resume_existing_state) {
             << " current_spp=" << m_atomic_current_spp.load()
             << " target_spp=" << job.target_spp
             << " threads=" << job.thread_count
+            << " exposure=" << sanitize_exposure(m_exposure.load())
             << " integrator=" << static_cast<int>(job.settings.integrator.kind);
         write_log(oss.str());
     }
@@ -823,6 +885,8 @@ void ProductionApp::render_worker(RenderJobSnapshot job) {
             if (pixel_error.load()) {
                 throw std::runtime_error(pixel_error_message.empty() ? "Pixel render failed" : pixel_error_message);
             }
+
+            propagate_ris_directions_spatial(job.settings.integrator, sample_index);
 
             const int next_spp = sample_index + 1;
             m_atomic_current_spp.store(next_spp);
@@ -955,7 +1019,7 @@ bool ProductionApp::load_renderstate_from_path(const std::string& path) {
     }
 
     std::uint32_t version = 0;
-    if (!read_pod(in, version) || version != kRenderStateVersion) {
+    if (!read_pod(in, version) || version == 0 || version > kRenderStateVersion) {
         m_status_message = "Unsupported .renderstate version";
         set_status(ProductionStatus::Error);
         return false;
@@ -980,6 +1044,16 @@ bool ProductionApp::load_renderstate_from_path(const std::string& path) {
         m_status_message = "Failed to read .renderstate header";
         set_status(ProductionStatus::Error);
         return false;
+    }
+
+    float exposure = 1.0f;
+    if (version >= 2) {
+        if (!read_pod(in, exposure)) {
+            m_status_message = "Failed to read .renderstate exposure";
+            set_status(ProductionStatus::Error);
+            return false;
+        }
+        exposure = sanitize_exposure(exposure);
     }
 
     if (width == 0 || height == 0 || width > 16384 || height > 16384) {
@@ -1049,6 +1123,7 @@ bool ProductionApp::load_renderstate_from_path(const std::string& path) {
     m_bounds_max = settings.field_bounds_max;
     m_current_spp = static_cast<int>(current_spp);
     m_target_spp = std::max(static_cast<int>(target_spp), m_current_spp + 1);
+    m_exposure.store(exposure);
     m_atomic_current_spp.store(m_current_spp);
     m_atomic_target_spp.store(m_target_spp);
     m_last_estimate_spp = m_current_spp;
@@ -1109,6 +1184,10 @@ bool ProductionApp::save_renderstate_to_path(const std::string& path, const Rend
     if (!write_pod(out, width) || !write_pod(out, height) || !write_pod(out, current_spp) || !write_pod(out, target_spp) || !write_pod(out, ris_bins)) {
         return false;
     }
+    const float exposure = sanitize_exposure(m_exposure.load());
+    if (!write_pod(out, exposure)) {
+        return false;
+    }
 
     for (const Color& c : m_accum) {
         if (!write_pod(out, c.r) || !write_pod(out, c.g) || !write_pod(out, c.b)) {
@@ -1139,7 +1218,7 @@ bool ProductionApp::save_current_png_to_path(const std::string& path) {
     std::vector<unsigned char> rgba;
     {
         std::lock_guard<std::mutex> lock(m_data_mutex);
-        make_rgba_from_accum(m_accum, m_atomic_current_spp.load(), m_width, m_height, rgba);
+        make_rgba_from_accum(m_accum, m_atomic_current_spp.load(), m_width, m_height, m_exposure.load(), rgba);
     }
     const bool ok = write_png_rgba8(path.c_str(), m_width, m_height, rgba.data());
     if (!ok) {
@@ -1195,6 +1274,25 @@ void ProductionApp::ensure_ris_directions(const IntegratorSettings& settings) {
     }
 }
 
+
+void ProductionApp::propagate_ris_directions_spatial(const IntegratorSettings& settings, int completed_sample_index) {
+    if (settings.kind != IntegratorKind::RISDirection || !settings.ris_direction.spatial_reuse_enabled) {
+        return;
+    }
+    if (m_ris_directions.size() != static_cast<std::size_t>(m_width) * static_cast<std::size_t>(m_height)) {
+        return;
+    }
+
+    const int radius = std::clamp(settings.ris_direction.spatial_radius, 0, 8);
+    const float strength = std::clamp(settings.ris_direction.spatial_strength, 0.0f, 1.0f);
+    const int interval = std::max(1, settings.ris_direction.spatial_interval);
+    if (radius <= 0 || strength <= 0.0f || ((completed_sample_index + 1) % interval) != 0) {
+        return;
+    }
+
+    propagate_spatial_ris_direction_scores(m_ris_directions, m_width, m_height, radius, strength);
+}
+
 uint64_t ProductionApp::seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const {
     uint64_t seed = sample_seed_base(settings);
     seed = hash_combine(seed, static_cast<uint64_t>(std::max(0, x)));
@@ -1209,7 +1307,7 @@ Vec2 ProductionApp::pixel_center_to_world(int x, int y) const {
 
 void ProductionApp::update_preview_from_accum_locked(bool update_convergence) {
     const int samples = m_atomic_current_spp.load();
-    make_rgba_from_accum(m_accum, samples, m_width, m_height, m_preview_rgba);
+    make_rgba_from_accum(m_accum, samples, m_width, m_height, m_exposure.load(), m_preview_rgba);
     m_preview_dirty = true;
 
     if (!update_convergence || samples <= 0) {

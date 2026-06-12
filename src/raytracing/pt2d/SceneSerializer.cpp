@@ -444,6 +444,10 @@ bool save_scene_json(const std::string& path, const Scene& scene, const SceneDoc
     out << "    \"ris_exploration_percent\": " << settings.integrator.ris_direction.min_probability_percent << ",\n";
     out << "    \"ris_smooth_sigma_deg\": " << settings.integrator.ris_direction.smooth_sigma_deg << ",\n";
     out << "    \"ris_candidate_count\": " << settings.integrator.ris_direction.candidate_count << ",\n";
+    out << "    \"ris_spatial_reuse_enabled\": " << (settings.integrator.ris_direction.spatial_reuse_enabled ? "true" : "false") << ",\n";
+    out << "    \"ris_spatial_radius\": " << settings.integrator.ris_direction.spatial_radius << ",\n";
+    out << "    \"ris_spatial_strength\": " << settings.integrator.ris_direction.spatial_strength << ",\n";
+    out << "    \"ris_spatial_interval\": " << settings.integrator.ris_direction.spatial_interval << ",\n";
     out << "    \"field_width\": " << settings.field_width << ",\n";
     out << "    \"field_height\": " << settings.field_height << ",\n";
     out << "    \"field_bounds_min\": "; write_vec2(out, settings.field_bounds_min); out << ",\n";
@@ -534,6 +538,10 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
         read_number(*renderer, "ris_exploration_percent", next_settings.integrator.ris_direction.min_probability_percent);
         read_number(*renderer, "ris_smooth_sigma_deg", next_settings.integrator.ris_direction.smooth_sigma_deg);
         read_number(*renderer, "ris_candidate_count", next_settings.integrator.ris_direction.candidate_count);
+        read_bool(*renderer, "ris_spatial_reuse_enabled", next_settings.integrator.ris_direction.spatial_reuse_enabled);
+        read_number(*renderer, "ris_spatial_radius", next_settings.integrator.ris_direction.spatial_radius);
+        read_number(*renderer, "ris_spatial_strength", next_settings.integrator.ris_direction.spatial_strength);
+        read_number(*renderer, "ris_spatial_interval", next_settings.integrator.ris_direction.spatial_interval);
         read_number(*renderer, "field_width", next_settings.field_width);
         read_number(*renderer, "field_height", next_settings.field_height);
         read_vec2(*renderer, "field_bounds_min", next_settings.field_bounds_min);
@@ -595,6 +603,9 @@ bool load_scene_json(const std::string& path, Scene& scene, SceneDocumentSetting
     next_settings.integrator.ris_direction.min_probability_percent = std::clamp(next_settings.integrator.ris_direction.min_probability_percent, 0.0f, 100.0f);
     next_settings.integrator.ris_direction.smooth_sigma_deg = std::clamp(next_settings.integrator.ris_direction.smooth_sigma_deg, 0, 180);
     next_settings.integrator.ris_direction.candidate_count = std::clamp(next_settings.integrator.ris_direction.candidate_count, 1, 128);
+    next_settings.integrator.ris_direction.spatial_radius = std::clamp(next_settings.integrator.ris_direction.spatial_radius, 1, 8);
+    next_settings.integrator.ris_direction.spatial_strength = std::clamp(next_settings.integrator.ris_direction.spatial_strength, 0.0f, 1.0f);
+    next_settings.integrator.ris_direction.spatial_interval = std::clamp(next_settings.integrator.ris_direction.spatial_interval, 1, 16);
     next_settings.field_width = std::max(1, next_settings.field_width);
     next_settings.field_height = std::max(1, next_settings.field_height);
     next_settings.samples_per_frame = std::max(1, next_settings.samples_per_frame);

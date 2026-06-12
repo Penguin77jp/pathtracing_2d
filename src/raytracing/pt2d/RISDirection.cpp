@@ -176,7 +176,11 @@ namespace pt2d {
 		if (scores.size() != m_score.size()) {
 			return;
 		}
-		m_score = scores;
+
+		for (size_t i = 0; i < m_score.size(); ++i) {
+			const float score = scores[i];
+			m_score[i] = (std::isfinite(score) && score > 0.0f) ? score : 0.0f;
+		}
 		invalidate_distribution_cache();
 	}
 
@@ -222,23 +226,31 @@ namespace pt2d {
 			return;
 		}
 
-		std::vector<float> sanitized_weights(N, 0.0f);
+		// All candidates have already been evaluated by the integrator.  Use every
+		// finite positive candidate for learning instead of sampling a single one.
+		// The 1/N factor keeps the learning rate roughly independent of
+		// candidate_count, while preserving the relative bin strengths.
+		const float inv_N = 1.0f / static_cast<float>(N);
+		bool any_update = false;
 		for (size_t i = 0; i < N; ++i) {
 			const float w = weighted_contributions[i];
-			sanitized_weights[i] = (std::isfinite(w) && w > 0.0f) ? w : 0.0f;
+			if (!std::isfinite(w) || w <= 0.0f) {
+				continue;
+			}
+
+			const float scaled_weight = w * inv_N;
+			if (!std::isfinite(scaled_weight) || scaled_weight <= 0.0f) {
+				continue;
+			}
+
+			const size_t index = bin_index(angular_samples[i].theta);
+			m_score[index] += scaled_weight;
+			any_update = true;
 		}
 
-		const float weight_sum = sum_vector(sanitized_weights);
-		int selected_index = random_weight_selection(sanitized_weights, weight_sum, m_sampler);
-		if (selected_index < 0) {
-			return;
+		if (any_update) {
+			invalidate_distribution_cache();
 		}
-
-		if (static_cast<size_t>(selected_index) >= N) {
-			selected_index = static_cast<int>(N - 1);
-		}
-
-		update(angular_samples[static_cast<size_t>(selected_index)].theta, sanitized_weights[static_cast<size_t>(selected_index)]);
 	}
 
 	void RISDirection::update(std::vector<RISDirection::AngularSample>& angular_samples, std::vector<Color>& weighted_contributions){
@@ -258,4 +270,105 @@ namespace pt2d {
 		return static_cast<size_t>(theta / m_bin_width) % m_score.size();
 	}
 
+
+void propagate_spatial_ris_direction_scores(
+    std::vector<RISDirection>& ris_directions,
+    int width,
+    int height,
+    int radius,
+    float strength) {
+    width = std::max(0, width);
+    height = std::max(0, height);
+    radius = std::max(0, radius);
+    strength = std::clamp(strength, 0.0f, 1.0f);
+
+    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (pixel_count == 0 || ris_directions.size() != pixel_count || radius <= 0 || strength <= 0.0f) {
+        return;
+    }
+
+    const size_t bin_count = static_cast<size_t>(ris_directions.front().num_bins());
+    if (bin_count == 0) {
+        return;
+    }
+
+    std::vector<float> blended_scores(pixel_count * bin_count, 0.0f);
+    std::vector<float> neighbor_average(bin_count, 0.0f);
+
+    const float sigma = std::max(1.0f, static_cast<float>(radius) * 0.5f);
+    const float inv_two_sigma2 = 1.0f / (2.0f * sigma * sigma);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t index = static_cast<size_t>(y * width + x);
+            const std::vector<float>& self_scores = ris_directions[index].scores();
+            const size_t output_offset = index * bin_count;
+            if (self_scores.size() != bin_count) {
+                for (size_t bin = 0; bin < std::min(bin_count, self_scores.size()); ++bin) {
+                    blended_scores[output_offset + bin] = self_scores[bin];
+                }
+                continue;
+            }
+
+            std::fill(neighbor_average.begin(), neighbor_average.end(), 0.0f);
+            float weight_sum = 0.0f;
+
+            for (int dy = -radius; dy <= radius; ++dy) {
+                const int ny = y + dy;
+                if (ny < 0 || ny >= height) {
+                    continue;
+                }
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int nx = x + dx;
+                    if (nx < 0 || nx >= width || (dx == 0 && dy == 0)) {
+                        continue;
+                    }
+
+                    const float distance2 = static_cast<float>(dx * dx + dy * dy);
+                    const float w = std::exp(-distance2 * inv_two_sigma2);
+                    if (w <= 0.0f || !std::isfinite(w)) {
+                        continue;
+                    }
+
+                    const size_t neighbor_index = static_cast<size_t>(ny * width + nx);
+                    const std::vector<float>& neighbor_scores = ris_directions[neighbor_index].scores();
+                    if (neighbor_scores.size() != bin_count) {
+                        continue;
+                    }
+
+                    for (size_t bin = 0; bin < bin_count; ++bin) {
+                        const float score = neighbor_scores[bin];
+                        if (std::isfinite(score) && score > 0.0f) {
+                            neighbor_average[bin] += w * score;
+                        }
+                    }
+                    weight_sum += w;
+                }
+            }
+
+            if (weight_sum <= 0.0f || !std::isfinite(weight_sum)) {
+                for (size_t bin = 0; bin < bin_count; ++bin) {
+                    blended_scores[output_offset + bin] = self_scores[bin];
+                }
+                continue;
+            }
+
+            const float inv_weight_sum = 1.0f / weight_sum;
+            for (size_t bin = 0; bin < bin_count; ++bin) {
+                const float self = (std::isfinite(self_scores[bin]) && self_scores[bin] > 0.0f) ? self_scores[bin] : 0.0f;
+                const float neighbor = neighbor_average[bin] * inv_weight_sum;
+                blended_scores[output_offset + bin] = (1.0f - strength) * self + strength * neighbor;
+            }
+        }
+    }
+
+    std::vector<float> temp_scores(bin_count, 0.0f);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        const size_t input_offset = i * bin_count;
+        for (size_t bin = 0; bin < bin_count; ++bin) {
+            temp_scores[bin] = blended_scores[input_offset + bin];
+        }
+        ris_directions[i].set_scores(temp_scores);
+    }
+}
 } // namespace pt2d

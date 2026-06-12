@@ -67,6 +67,7 @@ private:
 
     void initialize_render_buffers(const SceneDocumentSettings& settings);
     void ensure_ris_directions(const IntegratorSettings& settings);
+    void propagate_ris_directions_spatial(const IntegratorSettings& settings, int completed_sample_index);
     uint64_t seed_for_pixel(int x, int y, int sample_index, const IntegratorSettings& settings) const;
     Vec2 pixel_center_to_world(int x, int y) const;
     void update_preview_from_accum_locked(bool update_convergence);
@@ -101,6 +102,7 @@ private:
     int m_target_spp = 1000;
     int m_thread_count = 0; // 0 = auto
     int m_current_spp = 0;
+    std::atomic<float> m_exposure{1.0f};
     bool m_lock_aspect_to_scene_bounds = true;
 
     int m_width = 1;

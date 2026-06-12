@@ -30,6 +30,11 @@ struct RISDirectionSettings {
     float min_probability_percent = 10;
     int smooth_sigma_deg = 15;
     int candidate_count = 16;
+
+    bool spatial_reuse_enabled = false;
+    int spatial_radius = 1;
+    float spatial_strength = 0.25f;
+    int spatial_interval = 1;
 };
 
 struct SpectralSettings {

@@ -70,6 +70,7 @@ public:
 private:
     void update_rgba_buffer();
     void ensure_ris_directions(const IntegratorSettings& settings);
+    void propagate_ris_directions_spatial(const IntegratorSettings& settings, int completed_sample_index);
 
     int m_width = 320;
     int m_height = 224;

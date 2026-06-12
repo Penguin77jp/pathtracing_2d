@@ -1,0 +1,145 @@
+{
+  "version": 2,
+  "renderer": {
+    "integrator": "ris_direction",
+    "max_depth": 6,
+    "seed": 1,
+    "spectral_enabled": true,
+    "spectral_wavelength_samples": 1,
+    "spectral_xyz_importance": true,
+    "photon_count": 20000,
+    "photon_max_depth": 8,
+    "photon_gather_radius": 0.119999997,
+    "photon_strength": 1,
+    "photon_caustics_only": true,
+    "ris_num_bins": 45,
+    "ris_exploration_percent": 10,
+    "ris_smooth_sigma_deg": 15,
+    "ris_candidate_count": 16,
+    "ris_spatial_reuse_enabled": true,
+    "ris_spatial_radius": 1,
+    "ris_spatial_strength": 0.25,
+    "ris_spatial_interval": 1,
+    "field_width": 320,
+    "field_height": 224,
+    "field_bounds_min": [-3.20000005, -2.25],
+    "field_bounds_max": [3.20000005, 2.25],
+    "samples_per_frame": 1,
+    "stop_after_samples": 10
+  },
+  "segments": [
+    {
+      "a": [-3, -2],
+      "b": [3, -2],
+      "normal": [0, 1],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.779999971, 0.779999971, 0.74000001],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    },
+    {
+      "a": [3, -2],
+      "b": [3, 2],
+      "normal": [-1, 0],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.25, 0.349999994, 0.949999988],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    },
+    {
+      "a": [3, 2],
+      "b": [0.649999976, 2],
+      "normal": [0, -1],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.779999971, 0.779999971, 0.74000001],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    },
+    {
+      "a": [-0.649999976, 2],
+      "b": [-3, 2],
+      "normal": [0, -1],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.779999971, 0.779999971, 0.74000001],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    },
+    {
+      "a": [-3, 2],
+      "b": [-3, -2],
+      "normal": [1, 0],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.899999976, 0.25, 0.200000003],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    },
+    {
+      "a": [-0.649999976, 2],
+      "b": [0.649999976, 2],
+      "normal": [0, -1],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0, 0, 0],
+        "emission": [8, 7.5, 6.5],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 15
+      }
+    },
+    {
+      "a": [-0.396621108, -2],
+      "b": [0.218040943, -0.817239404],
+      "normal": [-0.887331426, 0.461132169],
+      "material": {
+        "kind": "diffuse",
+        "albedo": [0.769607842, 0.40743947, 0.40743947],
+        "emission": [0, 0, 0],
+        "ior": 1,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0,
+        "emission_angle_deg": 180
+      }
+    }
+  ],
+  "circles": [
+    {
+      "center": [-0.779999971, 0.5],
+      "radius": 0.419999987,
+      "material": {
+        "kind": "dielectric",
+        "albedo": [0.959999979, 0.980000019, 1],
+        "emission": [0, 0, 0],
+        "ior": 1.5,
+        "cauchy_a": 1.5,
+        "cauchy_b": 0.5,
+        "emission_angle_deg": 180
+      }
+    }
+  ]
+}
