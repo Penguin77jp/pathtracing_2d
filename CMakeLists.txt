@@ -45,27 +45,25 @@ target_include_directories(imgui PUBLIC
 )
 target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
-add_executable(pathtracing_2d
-    src/main.cpp
-    src/pt2d/App.cpp
-    src/pt2d/Integrator.cpp
-    src/pt2d/Scene.cpp
-    src/pt2d/PngWriter.cpp
-    src/pt2d/SceneSerializer.cpp
-    src/pt2d/ProductionApp.cpp
-    src/pt2d/RISDirection.cpp
- )
+add_library(eigen INTERFACE)
+target_include_directories(eigen SYSTEM INTERFACE
+    ${PROJECT_SOURCE_DIR}/external/eigen
+)
+if(MSVC)
+    target_compile_options(eigen INTERFACE /wd4819)
+endif()
 
-target_include_directories(pathtracing_2d PRIVATE src)
-target_link_libraries(pathtracing_2d PRIVATE imgui glfw OpenGL::GL)
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE
+    ${PROJECT_SOURCE_DIR}/external/stb
+)
 
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(pathtracing_2d PRIVATE OpenMP::OpenMP_CXX)
     message(STATUS "OpenMP enabled")
 else()
     message(WARNING "OpenMP was not found; production rendering will build without OpenMP parallelism")
 endif()
 
-if(APPLE)
-    target_compile_definitions(pathtracing_2d PRIVATE GL_SILENCE_DEPRECATION)
-endif()
+add_subdirectory(src/montecarlo_integration_simd)
+add_subdirectory(src/ray_tracing_in_one_weekend_simd)
+add_subdirectory(src/raytracing)
