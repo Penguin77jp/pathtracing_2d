@@ -1,55 +1,141 @@
 #include <cstdio>
 #include <iostream>
+#include <string_view>
 
+#include <stb_image_write.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 
 #include "camera.h"
 #include "image.h"
-#include "scene.h"
+#include "path_tracer.h"
+#include "render_config.h"
+#include "scene_factory.h"
 
 using namespace pg;
 
-int main(void) {
-    const int cam_scale_k = 1;
-    const int cam_scale = cam_scale_k * 60;
-	const int cam_width = 16 * cam_scale;
-	const int cam_height = 9 * cam_scale;
-	const int cam_samples = 8 * 100;
-    Vec3f cam_org(0.0f, 0.0f, -1.0f);
-    Vec3f cam_lookat( 0.0f, 0.0f, 0.0f );
-	float cam_fov = 90.0f;
-	Camera camera(cam_width, cam_height, cam_org, cam_lookat, cam_fov);
-    if (cam_samples % 8 > 0) {
-		std::cerr << "cam_samples must be a multiple of 8 for SIMD packet processing." << std::endl << "cam_samples = " << cam_samples << std::endl;
-		return 1;
-    }
+namespace {
 
-    Scene world;
-    world.add_sphere(Vec3f(0.0f, 0.0f, -1.0f), 0.5f);
-    world.add_sphere(Vec3f(0.0f, -100.5f, -1.0f), 100.0f);
+RenderConfig parse_options(int argc, char** argv) {
+    ScenePreset scene = ScenePreset::FinalBookScene;
+    RenderMode mode = RenderMode::PathTracerExercise;
+    bool quick = false;
+    std::string output_path;
 
-    Image image( cam_width,cam_height );
-
-    for (int y = 0; y < cam_height; ++y) {
-        for (int x = 0; x < cam_width; ++x) {
-            Color8 accumulated_color;
-            for (int s = 0; s < cam_samples/8; ++s) {
-                RngPacket8 rng = RngPacket8::seeded(x, y);
-                const Ray8 rays = camera.get_ray_packet(x, y, rng);
-                const Color8 sample_color = ray_color_packet(rays, world);
-                accumulated_color += rays.direction;
-            }
-			const Vec3f result_color = accumulated_color.mean() / static_cast<float>(cam_samples / 8);
-            image.store_packet(x, y, result_color);
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg(argv[i]);
+        if (arg == "--final") {
+            scene = ScenePreset::FinalBookScene;
+        } else if (arg == "--materials") {
+            scene = ScenePreset::MaterialTest;
+        } else if (arg == "--path") {
+            mode = RenderMode::PathTracerExercise;
+        } else if (arg == "--normal") {
+            mode = RenderMode::NormalPreview;
+        } else if (arg == "--quick") {
+            quick = true;
+        } else if (arg.starts_with("--output=")) {
+            output_path = std::string(arg.substr(9));
         }
     }
 
-    const char* output_path = "ray_tracing_in_one_weekend_simd.png";
-    if (!image.write_png(output_path)) {
-        std::printf("Failed to write %s\n", output_path);
+    RenderConfig config = scene == ScenePreset::FinalBookScene
+        ? final_scene_config()
+        : material_test_config();
+    config.mode = mode;
+
+    if (!output_path.empty()) {
+        config.output_path = output_path;
+    }
+
+    if (quick) {
+        apply_quick_settings(config);
+    }
+
+    if (config.output_path.ends_with(".png") && !Image::png_supported()) {
+        std::cerr
+            << "stb_image_write.h was not found; using PPM output instead.\n";
+        exit(1);
+    }
+
+    return config;
+}
+} // namespace
+
+int main(int argc, char** argv) {
+    RenderConfig config = parse_options(argc, argv);
+    config.print();
+
+    if (config.samples_per_pixel <= 0
+        || config.samples_per_pixel % 8 != 0) {
+        std::cerr
+            << "samples_per_pixel must be a positive multiple of 8 for "
+            << "SIMD packet processing.\n";
         return 1;
     }
 
-    std::printf("Wrote %s\n", output_path);
+    const Camera camera(
+        config.image_width,
+        config.image_height,
+        config.camera.lookfrom,
+        config.camera.lookat,
+        config.camera.vup,
+        config.camera.vertical_fov_degrees,
+        config.camera.focus_distance,
+        config.camera.defocus_angle_degrees
+    );
+
+    const Scene world = make_scene(config.scene);
+    Image image(config.image_width, config.image_height);
+
+    std::cout
+        << "Rendering " << config.image_width << 'x' << config.image_height
+        << ", samples=" << config.samples_per_pixel
+        << ", spheres=" << world.sphere_count() << '\n';
+
+    const int packet_count = config.samples_per_pixel / 8;
+
+    for (int y = 0; y < config.image_height; ++y) {
+        std::clog
+            << "\rScanlines remaining: "
+            << (config.image_height - y)
+            << ' '
+            << std::flush;
+
+        for (int x = 0; x < config.image_width; ++x) {
+            Color8 accumulated_color;
+            RngPacket8 rng = RngPacket8::seeded(x, y);
+
+            for (int packet = 0; packet < packet_count; ++packet) {
+                const Ray8 rays = camera.get_ray_packet(x, y, rng);
+                const Color8 sample_color =
+                    config.mode == RenderMode::PathTracerExercise
+                    ? ray_color_path_packet(
+                        rays,
+                        world,
+                        rng,
+                        config.max_depth
+                    )
+                    : ray_color_normal_packet(rays, world);
+                accumulated_color += sample_color;
+            }
+
+            const Vec3f averaged_color =
+                accumulated_color.mean() / static_cast<float>(packet_count);
+            image.store_linear_color(x, y, averaged_color);
+        }
+    }
+
+    std::clog << "\rDone.                      \n";
+
+    if (!image.write(config.output_path)) {
+        std::fprintf(
+            stderr,
+            "Failed to write %s\n",
+            config.output_path.c_str()
+        );
+        return 1;
+    }
+
+    std::printf("Wrote %s\n", config.output_path.c_str());
     return 0;
 }

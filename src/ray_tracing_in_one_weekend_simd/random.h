@@ -149,12 +149,10 @@ namespace pg {
             // •„†•t‚«®”‚Æ‚µ‚Äfloat‚Ö•ÏŠ·‚µ‚Ä‚à–â‘è‚È‚¢
             const __m256 random_float =
                 _mm256_cvtepi32_ps(random24);
-
-            const __m256 scale =
-                _mm256_set1_ps(1.0f / 16777216.0f);
+            const static __m256 float_scale = _mm256_set1_ps(1.0f / 16777216.0f);
 
             return Float8{
-                _mm256_mul_ps(random_float, scale)
+                _mm256_mul_ps(random_float, float_scale)
             };
         }
     };
