@@ -19,6 +19,9 @@ add_executable(ray_tracing_in_one_weekend_simd
 target_compile_features(ray_tracing_in_one_weekend_simd PRIVATE cxx_std_20)
 target_link_libraries(ray_tracing_in_one_weekend_simd PRIVATE stb)
 
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(ray_tracing_in_one_weekend_simd PRIVATE OpenMP::OpenMP_CXX)
+endif()
 if(MSVC)
     target_compile_options(ray_tracing_in_one_weekend_simd PRIVATE /arch:AVX2)
 else()

@@ -1,7 +1,7 @@
 #include <cstdio>
 #include <iostream>
 #include <string_view>
-
+#include <chrono>
 #include <stb_image_write.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 
@@ -94,6 +94,7 @@ int main(int argc, char** argv) {
 
     const int packet_count = config.samples_per_pixel / 8;
 
+	const auto _start_time = std::chrono::high_resolution_clock::now();
     for (int y = 0; y < config.image_height; ++y) {
         std::clog
             << "\rScanlines remaining: "
@@ -101,6 +102,7 @@ int main(int argc, char** argv) {
             << ' '
             << std::flush;
 
+#pragma omp parallel for schedule(dynamic)
         for (int x = 0; x < config.image_width; ++x) {
             Color8 accumulated_color;
             RngPacket8 rng = RngPacket8::seeded(x, y);
@@ -124,8 +126,10 @@ int main(int argc, char** argv) {
             image.store_linear_color(x, y, averaged_color);
         }
     }
+	const auto _end_time = std::chrono::high_resolution_clock::now();
 
     std::clog << "\rDone.                      \n";
+
 
     if (!image.write(config.output_path)) {
         std::fprintf(
@@ -137,5 +141,13 @@ int main(int argc, char** argv) {
     }
 
     std::printf("Wrote %s\n", config.output_path.c_str());
+    std::printf(
+        "Elapsed time: %.3f seconds\n",
+        std::chrono::duration<double>(_end_time - _start_time).count()
+	);
+    std::printf(
+        "Elapsed time: %.3e ms/pixel/sample\n",
+		std::chrono::duration<double>(_end_time - _start_time).count() / (config.image_width * config.image_height * config.samples_per_pixel) * 1000.0
+    );
     return 0;
 }

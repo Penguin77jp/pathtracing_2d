@@ -1,10 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <immintrin.h>
 
 #include "math.h"
-#include "random.h"
 
 namespace pg {
 
@@ -77,20 +77,15 @@ struct Material8 {
 
     friend Material8 select(
         const Bool8& hit_mask,
-        const Material8& if_ture,
+        const Material8& if_true,
         const Material8& if_false) {
         Material8 result;
-		result.kind = select(hit_mask, if_ture.kind, if_false.kind);
-		result.albedo = select(hit_mask, if_ture.albedo, if_false.albedo);
-		result.fuzz = select(hit_mask, if_ture.fuzz, if_false.fuzz);
-		result.refraction_index = select(hit_mask, if_ture.refraction_index, if_false.refraction_index);
+		result.kind = select(hit_mask, if_true.kind, if_false.kind);
+		result.albedo = select(hit_mask, if_true.albedo, if_false.albedo);
+		result.fuzz = select(hit_mask, if_true.fuzz, if_false.fuzz);
+		result.refraction_index = select(hit_mask, if_true.refraction_index, if_false.refraction_index);
         return result;
     }
-    friend Vec3f8 next_dir(const Vec3f8& dir, const Material8& material, RngPacket8& rng) {
-        Bool8 mask_lambert = material.kind == EnumInt8(static_cast<std::int32_t>(MaterialKind::Lambertian));
-        
 
-        return Vec3f8{};
-    }
 };
 } // namespace pg

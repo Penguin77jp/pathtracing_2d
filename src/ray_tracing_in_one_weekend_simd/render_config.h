@@ -91,11 +91,11 @@ inline RenderConfig material_test_config() {
 
 inline RenderConfig final_scene_config() {
     RenderConfig config;
-    config.image_width = 320;
-    config.image_height = 100;
+    config.image_width = 640;
+    config.image_height = 200;
     //config.image_width = 1200;
     //config.image_height = 675;
-    config.samples_per_pixel = 8 * 1;
+    config.samples_per_pixel = 8 * 25;
     config.max_depth = 8;
     config.scene = ScenePreset::FinalBookScene;
     config.camera.lookfrom = Vec3f(13.0f, 2.0f, 3.0f);

@@ -11,11 +11,7 @@ struct SurfaceHit8 {
     HitRecord8 geometry{};
     Material8 material{};
 
-    friend Ray8 next_ray(SurfaceHit8& hit, Ray8& ray, Float8& t_eps, RngPacket8& rng) {
-		Vec3f8 new_origin = hit.geometry.p + hit.geometry.normal * t_eps;
-        Vec3f8 new_direction = next_dir(ray.direction, hit.material, rng);
-        return Ray8{ new_origin, new_direction };
-    }
+
 };
 
 struct Sphere {
