@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <immintrin.h>
 
-#include "math.h"
+#include "util/math.h"
 
 namespace pg {
 

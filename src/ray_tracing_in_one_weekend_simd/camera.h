@@ -4,9 +4,9 @@
 #include <cmath>
 #include <numbers>
 
-#include "math.h"
 #include "random.h"
 #include "random_sampling.h"
+#include "util/math.h"
 
 namespace pg {
 

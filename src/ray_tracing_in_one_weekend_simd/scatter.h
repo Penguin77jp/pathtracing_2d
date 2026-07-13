@@ -56,8 +56,7 @@ inline ScatterRecord8 scatter_lambertian_packet(
     RngPacket8& rng) {
     (void)incoming;
 
-    const Vec3f8 direction =
-        lambertian_next_direction_packet(hit.geometry, rng);
+    const Vec3f8 direction = lambertian_next_direction_packet(hit.geometry, rng);
 
     return ScatterRecord8{
         Ray8{hit.geometry.p, direction},
@@ -178,37 +177,15 @@ inline ScatterRecord8 scatter_packet(
     RngPacket8& rng) {
     const Bool8 hit_mask = hit.geometry.hit;
 
-    const Bool8 lambertian_mask = hit_mask & (
-        hit.material.kind
-        == EnumInt8(static_cast<std::int32_t>(MaterialKind::Lambertian))
-    );
-    const Bool8 metal_mask = hit_mask & (
-        hit.material.kind
-        == EnumInt8(static_cast<std::int32_t>(MaterialKind::Metal))
-    );
-    const Bool8 dielectric_mask = hit_mask & (
-        hit.material.kind
-        == EnumInt8(static_cast<std::int32_t>(MaterialKind::Dielectric))
-    );
+    const Bool8 lambertian_mask = hit_mask & ( hit.material.kind == EnumInt8(static_cast<std::int32_t>(MaterialKind::Lambertian)) );
+    const Bool8 metal_mask = hit_mask & (hit.material.kind == EnumInt8(static_cast<std::int32_t>(MaterialKind::Metal)));
+    const Bool8 dielectric_mask = hit_mask & (hit.material.kind == EnumInt8(static_cast<std::int32_t>(MaterialKind::Dielectric)));
 
-    const ScatterRecord8 lambertian = scatter_lambertian_packet(
-        incoming,
-        hit,
-        lambertian_mask,
-        rng
-    );
-    const ScatterRecord8 metal = scatter_metal_packet(
-        incoming,
-        hit,
-        metal_mask,
-        rng
-    );
-    const ScatterRecord8 dielectric = scatter_dielectric_packet(
-        incoming,
-        hit,
-        dielectric_mask,
-        rng
-    );
+	ScatterRecord8 lambertian, metal, dielectric;
+
+    if (lambertian_mask.any()) lambertian = scatter_lambertian_packet(incoming,hit,lambertian_mask,rng);
+    if (lambertian_mask.any()) metal = scatter_metal_packet(incoming,hit,metal_mask,rng);
+    if (lambertian_mask.any()) dielectric = scatter_dielectric_packet(incoming,hit,dielectric_mask,rng);
 
     ScatterRecord8 result = ScatterRecord8::none();
     result = select(lambertian_mask, lambertian, result);

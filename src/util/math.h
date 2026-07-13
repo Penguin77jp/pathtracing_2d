@@ -36,14 +36,12 @@ public:
         return Bool8{_mm256_xor_ps(values, all_bits)};
     }
 
-    // SIMD_EXERCISE(1): Implement with _mm256_movemask_ps.
-    [[nodiscard]] bool any() const noexcept {
-        return false;
+    bool any() const noexcept {
+        return _mm256_movemask_ps(values) != 0;
     }
 
-    // SIMD_EXERCISE(1): Implement without testing lanes one by one.
-    [[nodiscard]] bool none() const noexcept {
-        return false;
+    bool none() const noexcept {
+		return !any();
     }
 };
 

@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "math.h"
+#include "util/math.h"
 
 namespace pg {
 

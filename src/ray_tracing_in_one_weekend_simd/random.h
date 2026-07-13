@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <immintrin.h>
 
+#include "util/math.h"
+
 namespace pg {
 
     inline std::uint32_t mix32(std::uint32_t x) noexcept

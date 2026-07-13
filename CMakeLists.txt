@@ -38,7 +38,7 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
- )
+  "src/util/FFT.h")
 target_include_directories(imgui PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
@@ -54,9 +54,22 @@ if(MSVC)
 endif()
 
 add_library(stb INTERFACE)
-target_include_directories(stb INTERFACE
-    ${PROJECT_SOURCE_DIR}/external/stb
-)
+if(EXISTS "${PROJECT_SOURCE_DIR}/external/stb/stb_image.h")
+    target_include_directories(stb INTERFACE
+        ${PROJECT_SOURCE_DIR}/external/stb
+    )
+else()
+    FetchContent_Declare(
+        stb_headers
+        GIT_REPOSITORY https://github.com/nothings/stb.git
+        GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4
+    )
+    FetchContent_MakeAvailable(stb_headers)
+    target_include_directories(stb INTERFACE
+        ${stb_headers_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/external/stb
+    )
+endif()
 
 if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP enabled")
@@ -64,6 +77,8 @@ else()
     message(WARNING "OpenMP was not found; production rendering will build without OpenMP parallelism")
 endif()
 
+add_subdirectory(src/util)
 add_subdirectory(src/montecarlo_integration_simd)
 add_subdirectory(src/ray_tracing_in_one_weekend_simd)
+add_subdirectory(src/FFT_SIM)
 add_subdirectory(src/raytracing)

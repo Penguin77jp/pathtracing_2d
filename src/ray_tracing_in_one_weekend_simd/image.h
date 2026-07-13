@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "math.h"
+#include "util/math.h"
 
 #if __has_include(<stb_image_write.h>)
     #define STB_IMAGE_WRITE_IMPLEMENTATION

@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "material.h"
-#include "math.h"
+#include "util/math.h"
 
 namespace pg {
 
